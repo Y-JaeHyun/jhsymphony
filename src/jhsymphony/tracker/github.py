@@ -7,10 +7,16 @@ from jhsymphony.models import Issue, IssueState
 _API_BASE = "https://api.github.com"
 
 
+def _repo_slug(repo: str) -> str:
+    """Convert 'owner/repo' to 'owner-repo' for use in IDs."""
+    return repo.replace("/", "-")
+
+
 class GitHubTracker:
     def __init__(self, repo: str, label: str, token: str | None = None) -> None:
         self._repo = repo
         self._label = label
+        self._slug = _repo_slug(repo)
         headers = {"Accept": "application/vnd.github+json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -30,7 +36,7 @@ class GitHubTracker:
                 continue
             labels = [l["name"] for l in item.get("labels", [])]
             issues.append(Issue(
-                id=f"gh-{item['number']}",
+                id=f"gh-{self._slug}-{item['number']}",
                 number=item["number"],
                 repo=self._repo,
                 title=item["title"],

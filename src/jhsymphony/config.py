@@ -8,9 +8,16 @@ import yaml
 from pydantic import BaseModel
 
 
+class RepoConfig(BaseModel):
+    repo: str
+    label: str = "jhsymphony"
+    branch: str = "main"
+    poll_interval_sec: int = 30
+
+
 class ProjectConfig(BaseModel):
     name: str
-    repo: str
+    repo: str = ""  # legacy single-repo (still supported)
 
 
 class TrackerConfig(BaseModel):
@@ -77,6 +84,7 @@ class StorageConfig(BaseModel):
 
 class JHSymphonyConfig(BaseModel):
     project: ProjectConfig
+    repos: list[RepoConfig] = []
     tracker: TrackerConfig = TrackerConfig()
     orchestrator: OrchestratorConfig = OrchestratorConfig()
     providers: ProvidersConfig = ProvidersConfig()
@@ -86,6 +94,18 @@ class JHSymphonyConfig(BaseModel):
     budget: BudgetConfig = BudgetConfig()
     dashboard: DashboardConfig = DashboardConfig()
     storage: StorageConfig = StorageConfig()
+
+    def get_repos(self) -> list[RepoConfig]:
+        """Return repos list. Falls back to project.repo for backward compatibility."""
+        if self.repos:
+            return self.repos
+        if self.project.repo:
+            return [RepoConfig(
+                repo=self.project.repo,
+                label=self.tracker.label,
+                poll_interval_sec=self.tracker.poll_interval_sec,
+            )]
+        return []
 
 
 _ENV_VAR_PATTERN = re.compile(r"\$([A-Z_][A-Z0-9_]*)")
