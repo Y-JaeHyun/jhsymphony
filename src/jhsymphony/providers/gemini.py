@@ -41,10 +41,14 @@ class GeminiProvider:
             "--model", self._model,
         ]
         try:
+            import os
+            run_env = os.environ.copy()
+            if session.get("env"):
+                run_env.update(session["env"])
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=session["workspace_path"],
-                env=session.get("env") or None,
+                env=run_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

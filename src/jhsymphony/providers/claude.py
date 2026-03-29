@@ -69,17 +69,22 @@ class ClaudeProvider:
     async def run_turn(self, session: dict[str, Any], prompt: str) -> AsyncIterator[AgentEvent]:
         cmd = [
             self._command,
-            "--print",
+            "-p", prompt,
             "--output-format", "stream-json",
+            "--verbose",
+            "--permission-mode", "acceptEdits",
             "--model", self._model,
             "--max-turns", str(session.get("max_turns", self._max_turns)),
-            prompt,
         ]
         try:
+            import os
+            run_env = os.environ.copy()
+            if session.get("env"):
+                run_env.update(session["env"])
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=session["workspace_path"],
-                env=session.get("env") or None,
+                env=run_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
