@@ -40,17 +40,19 @@ class WorkspaceManager:
         branch = f"jhsymphony/{issue_key}"
 
         if not ws_path.exists():
+            # Prune stale worktree entries
+            await run_subprocess(
+                ["git", "worktree", "prune"],
+                cwd=str(self._repo), env=None, timeout_sec=30,
+            )
+            # Create branch (ignore error if already exists)
             await run_subprocess(
                 ["git", "branch", branch],
-                cwd=str(self._repo),
-                env=None,
-                timeout_sec=30,
+                cwd=str(self._repo), env=None, timeout_sec=30,
             )
             result = await run_subprocess(
-                ["git", "worktree", "add", str(ws_path), branch],
-                cwd=str(self._repo),
-                env=None,
-                timeout_sec=30,
+                ["git", "worktree", "add", "-f", str(ws_path), branch],
+                cwd=str(self._repo), env=None, timeout_sec=30,
             )
             if result.returncode != 0 and not ws_path.exists():
                 raise RuntimeError(f"Failed to create worktree: {result.stderr}")
