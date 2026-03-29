@@ -83,3 +83,65 @@ def test_router_unknown_provider_falls_back():
     )
     provider = router.select(labels=["use-unknown"])
     assert provider.name == "claude"
+
+
+# --- Claude, Codex, Gemini provider tests ---
+
+import pytest
+from jhsymphony.providers.claude import ClaudeProvider
+from jhsymphony.providers.codex import CodexProvider
+from jhsymphony.providers.gemini import GeminiProvider
+from jhsymphony.providers.base import RunContext
+
+
+@pytest.mark.asyncio
+async def test_claude_provider_capabilities():
+    provider = ClaudeProvider(command="echo", model="opus", max_turns=10)
+    caps = provider.capabilities()
+    assert caps.supports_tools is True
+    assert caps.supports_streaming is True
+    assert caps.supports_shell is True
+
+
+@pytest.mark.asyncio
+async def test_claude_provider_run_produces_events():
+    provider = ClaudeProvider(command="echo", model="opus", max_turns=1)
+    ctx = RunContext(workspace_path="/tmp", branch="test", issue_title="Test issue")
+    session = await provider.start_session(ctx)
+    events = []
+    async for event in provider.run_turn(session, "say hello"):
+        events.append(event)
+    assert len(events) >= 1
+    assert any(e.type == EventType.COMPLETED for e in events)
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_capabilities():
+    provider = CodexProvider(command="echo", model="gpt-5.4", sandbox="read-only")
+    caps = provider.capabilities()
+    assert caps.supports_tools is True
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_run():
+    provider = CodexProvider(command="echo", model="gpt-5.4", sandbox="read-only")
+    ctx = RunContext(workspace_path="/tmp", branch="test", issue_title="Test")
+    session = await provider.start_session(ctx)
+    events = [e async for e in provider.run_turn(session, "test")]
+    assert any(e.type == EventType.COMPLETED for e in events)
+
+
+@pytest.mark.asyncio
+async def test_gemini_provider_capabilities():
+    provider = GeminiProvider(command="echo", model="gemini-2.5-pro")
+    caps = provider.capabilities()
+    assert caps.supports_tools is True
+
+
+@pytest.mark.asyncio
+async def test_gemini_provider_run():
+    provider = GeminiProvider(command="echo", model="gemini-2.5-pro")
+    ctx = RunContext(workspace_path="/tmp", branch="test", issue_title="Test")
+    session = await provider.start_session(ctx)
+    events = [e async for e in provider.run_turn(session, "test")]
+    assert any(e.type == EventType.COMPLETED for e in events)
