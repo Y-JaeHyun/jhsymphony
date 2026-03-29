@@ -1,0 +1,60 @@
+project:
+  name: "my-project"
+  repo: "owner/repo"
+
+tracker:
+  kind: github
+  label: "jhsymphony"
+  poll_interval_sec: 30
+
+orchestrator:
+  max_concurrent_agents: 5
+  max_retries: 3
+  retry_backoff_sec: 60
+  lease_ttl_sec: 3600
+
+providers:
+  default: claude
+  claude:
+    command: "claude"
+    model: "opus"
+    max_turns: 30
+  codex:
+    command: "codex"
+    model: "gpt-5.4"
+    sandbox: "read-only"
+  gemini:
+    command: "gemini"
+    model: "gemini-2.5-pro"
+
+routing:
+  - label: "use-claude"
+    provider: claude
+  - label: "use-codex"
+    provider: codex
+  - label: "review-only"
+    provider: gemini
+    role: reviewer
+
+workspace:
+  root: "~/.jhsymphony/workspaces"
+  cleanup_on_success: true
+  keep_on_failure: true
+
+review:
+  enabled: true
+  provider: gemini
+  auto_approve: false
+
+budget:
+  daily_limit_usd: 50.0
+  per_run_limit_usd: 10.0
+  alert_threshold_pct: 80
+
+dashboard:
+  port: 8080
+  host: "0.0.0.0"
+
+storage:
+  backend: sqlite
+  path: "~/.jhsymphony/db.sqlite"
