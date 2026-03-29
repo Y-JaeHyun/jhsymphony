@@ -171,9 +171,19 @@ class Dispatcher:
             await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
             logger.info("Run %s completed for issue %s", run_id, issue.id)
 
-            # Post-completion: push branch, create PR, close issue
+            # Post-completion: commit uncommitted changes, push, create PR, close issue
             try:
-                await self._tracker.push_branch(str(workspace.path), workspace.branch)
+                # Auto-commit any uncommitted changes (some providers can't git commit in sandbox)
+                from jhsymphony.workspace.isolation import run_subprocess
+                ws_path = str(workspace.path)
+                await run_subprocess(["git", "add", "-A"], cwd=ws_path, env=None, timeout_sec=10)
+                diff_result = await run_subprocess(["git", "diff", "--cached", "--quiet"], cwd=ws_path, env=None, timeout_sec=10)
+                if diff_result.returncode != 0:  # there are staged changes
+                    await run_subprocess(
+                        ["git", "commit", "-m", f"feat: {issue.title} (#{issue.number})\n\nAutomatically implemented by JHSymphony"],
+                        cwd=ws_path, env=None, timeout_sec=10,
+                    )
+                await self._tracker.push_branch(ws_path, workspace.branch)
                 pr = await self._tracker.create_pr(
                     title=f"fix: {issue.title} (#{issue.number})",
                     head=workspace.branch,

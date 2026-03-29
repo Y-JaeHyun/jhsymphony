@@ -41,7 +41,8 @@ class CodexProvider:
             self._command,
             "exec",
             "--model", self._model,
-            "--sandbox", self._sandbox,
+            "--sandbox", "workspace-write",
+            "--skip-git-repo-check",
             prompt,
         ]
         try:

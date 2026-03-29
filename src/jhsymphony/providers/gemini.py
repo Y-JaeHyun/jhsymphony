@@ -39,6 +39,7 @@ class GeminiProvider:
             self._command,
             "-p", prompt,
             "--model", self._model,
+            "--approval-mode", "yolo",
         ]
         try:
             import os
