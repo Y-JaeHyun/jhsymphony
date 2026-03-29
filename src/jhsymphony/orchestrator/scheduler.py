@@ -37,8 +37,12 @@ class Scheduler:
                 if candidate.id in active_ids:
                     continue
                 existing = await self._storage.get_issue(candidate.id)
-                if existing and existing.state.is_active():
-                    continue
+                if existing:
+                    # Skip if already active OR already completed/failed
+                    if existing.state.is_active() or existing.state in (
+                        IssueState.COMPLETED, IssueState.FAILED, IssueState.CANCELLED,
+                    ):
+                        continue
                 await self._storage.upsert_issue(candidate)
                 await self._dispatcher.dispatch(candidate)
         except Exception:
