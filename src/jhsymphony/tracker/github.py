@@ -34,6 +34,7 @@ class GitHubTracker:
                 number=item["number"],
                 repo=self._repo,
                 title=item["title"],
+                body=item.get("body", "") or "",
                 labels=labels,
                 state=IssueState.PENDING,
             ))
@@ -62,6 +63,25 @@ class GitHubTracker:
         resp = await self._client.delete(url)
         if resp.status_code != 404:
             resp.raise_for_status()
+
+    async def close_issue(self, issue_number: int) -> None:
+        url = f"{_API_BASE}/repos/{self._repo}/issues/{issue_number}"
+        resp = await self._client.patch(url, json={"state": "closed"})
+        resp.raise_for_status()
+
+    async def push_branch(self, workspace_path: str, branch: str) -> None:
+        """Push the workspace branch to remote."""
+        import asyncio
+        import os
+        env = os.environ.copy()
+        proc = await asyncio.create_subprocess_exec(
+            "git", "push", "origin", branch, "--force",
+            cwd=workspace_path,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
 
     async def close(self) -> None:
         await self._client.aclose()

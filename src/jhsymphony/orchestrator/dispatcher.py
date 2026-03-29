@@ -121,12 +121,22 @@ class Dispatcher:
                 workspace_path=str(workspace.path),
                 branch=workspace.branch,
                 issue_title=issue.title,
-                issue_body="",
+                issue_body=issue.body,
             )
 
             # Start session and run agent
             session = await provider.start_session(ctx)
-            prompt = f"Please work on the following issue: {issue.title}"
+            prompt = (
+                f"You are working on GitHub issue #{issue.number}: {issue.title}\n\n"
+                f"{issue.body}\n\n"
+                f"Instructions:\n"
+                f"1. Read the existing code to understand the codebase\n"
+                f"2. Implement the requested changes\n"
+                f"3. Write or update tests\n"
+                f"4. Run the tests to make sure they pass\n"
+                f"5. Commit your changes with a descriptive message\n\n"
+                f"Work in the current directory. Do not ask questions — just implement."
+            )
 
             async for event in provider.run_turn(session, prompt):
                 await self._storage.insert_event(
@@ -160,6 +170,25 @@ class Dispatcher:
             await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
             await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
             logger.info("Run %s completed for issue %s", run_id, issue.id)
+
+            # Post-completion: push branch, create PR, close issue
+            try:
+                await self._tracker.push_branch(str(workspace.path), workspace.branch)
+                pr = await self._tracker.create_pr(
+                    title=f"fix: {issue.title} (#{issue.number})",
+                    head=workspace.branch,
+                    base="main",
+                    body=f"Automatically resolved by JHSymphony.\n\nCloses #{issue.number}",
+                )
+                pr_url = pr.get("html_url", "")
+                await self._tracker.post_comment(
+                    issue.number,
+                    f"**JHSymphony** completed this issue.\n- PR: {pr_url}\n- Run: `{run_id}`",
+                )
+                await self._tracker.close_issue(issue.number)
+                logger.info("Created PR and closed issue #%d", issue.number)
+            except Exception:
+                logger.warning("Post-completion actions failed for issue #%d", issue.number, exc_info=True)
 
         except asyncio.CancelledError:
             logger.info("Run %s was cancelled for issue %s", run_id, issue.id)

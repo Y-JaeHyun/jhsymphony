@@ -56,6 +56,7 @@ class Issue(BaseModel):
     number: int
     repo: str
     title: str
+    body: str = ""
     labels: list[str] = []
     state: IssueState = IssueState.PENDING
     priority: int = 0
