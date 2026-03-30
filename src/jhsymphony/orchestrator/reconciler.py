@@ -10,25 +10,20 @@ logger = logging.getLogger(__name__)
 
 
 class Reconciler:
-    def __init__(self, storage: Storage, tracker: Any, dispatcher: Any) -> None:
+    def __init__(self, storage: Storage, tracker: Any, dispatcher: Any, repo: str = "") -> None:
         self._storage = storage
         self._tracker = tracker
         self._dispatcher = dispatcher
+        self._repo = repo
 
     async def reconcile(self, current_candidates: list[Issue], active_issue_ids: set[str]) -> None:
         candidate_ids = {c.id for c in current_candidates}
-        # Only reconcile issues that belong to the same repo as our candidates
-        # This prevents cross-repo cancellation in multi-repo setups
-        if current_candidates:
-            repo = current_candidates[0].repo
-        else:
-            repo = None
         for issue_id in active_issue_ids:
             if issue_id not in candidate_ids:
-                # Only cancel if the issue belongs to the same repo we're tracking
+                # Only cancel issues belonging to this reconciler's repo
                 issue = await self._storage.get_issue(issue_id)
-                if issue and repo and issue.repo != repo:
-                    continue  # Skip issues from other repos
+                if issue and self._repo and issue.repo != self._repo:
+                    continue
                 logger.info("Issue %s no longer a candidate, cancelling", issue_id)
                 await self._cancel_issue(issue_id)
 

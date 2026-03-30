@@ -94,7 +94,7 @@ async def run_repo(
         budget_per_run_limit=budget_per_run,
     )
 
-    reconciler = Reconciler(storage=storage, tracker=tracker, dispatcher=dispatcher)
+    reconciler = Reconciler(storage=storage, tracker=tracker, dispatcher=dispatcher, repo=repo)
 
     scheduler = Scheduler(
         storage=storage,
