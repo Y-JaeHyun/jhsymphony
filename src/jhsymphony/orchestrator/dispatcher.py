@@ -130,12 +130,18 @@ class Dispatcher:
                 f"You are working on GitHub issue #{issue.number}: {issue.title}\n\n"
                 f"{issue.body}\n\n"
                 f"Instructions:\n"
+                f"Determine if this issue requires code changes or is a question/analysis request.\n\n"
+                f"If CODE CHANGES are needed:\n"
                 f"1. Read the existing code to understand the codebase\n"
                 f"2. Implement the requested changes\n"
                 f"3. Write or update tests\n"
                 f"4. Run the tests to make sure they pass\n"
                 f"5. Commit your changes with a descriptive message\n\n"
-                f"Work in the current directory. Do not ask questions — just implement."
+                f"If this is a QUESTION or ANALYSIS request (no code changes needed):\n"
+                f"1. Read and analyze the relevant code\n"
+                f"2. Provide a thorough, detailed answer\n"
+                f"3. Do NOT modify any files or create commits\n\n"
+                f"Work in the current directory. Do not ask questions — just do the work."
             )
 
             async for event in provider.run_turn(session, prompt):
@@ -171,32 +177,61 @@ class Dispatcher:
             await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
             logger.info("Run %s completed for issue %s", run_id, issue.id)
 
-            # Post-completion: commit uncommitted changes, push, create PR, close issue
+            # Post-completion: check if code changed → PR flow or comment-only flow
             try:
-                # Auto-commit any uncommitted changes (some providers can't git commit in sandbox)
                 from jhsymphony.workspace.isolation import run_subprocess
                 ws_path = str(workspace.path)
+
+                # Auto-commit uncommitted changes (some providers can't git commit in sandbox)
                 await run_subprocess(["git", "add", "-A"], cwd=ws_path, env=None, timeout_sec=10)
                 diff_result = await run_subprocess(["git", "diff", "--cached", "--quiet"], cwd=ws_path, env=None, timeout_sec=10)
-                if diff_result.returncode != 0:  # there are staged changes
+                has_uncommitted = diff_result.returncode != 0
+                if has_uncommitted:
                     await run_subprocess(
                         ["git", "commit", "-m", f"feat: {issue.title} (#{issue.number})\n\nAutomatically implemented by JHSymphony"],
                         cwd=ws_path, env=None, timeout_sec=10,
                     )
-                await self._tracker.push_branch(ws_path, workspace.branch)
-                pr = await self._tracker.create_pr(
-                    title=f"fix: {issue.title} (#{issue.number})",
-                    head=workspace.branch,
-                    base="main",
-                    body=f"Automatically resolved by JHSymphony.\n\nCloses #{issue.number}",
+
+                # Check if branch has any commits beyond base (main)
+                diff_from_main = await run_subprocess(
+                    ["git", "diff", "main...HEAD", "--quiet"], cwd=ws_path, env=None, timeout_sec=10,
                 )
-                pr_url = pr.get("html_url", "")
-                await self._tracker.post_comment(
-                    issue.number,
-                    f"**JHSymphony** completed this issue.\n- PR: {pr_url}\n- Run: `{run_id}`",
-                )
-                await self._tracker.close_issue(issue.number)
-                logger.info("Created PR and closed issue #%d", issue.number)
+                has_code_changes = diff_from_main.returncode != 0
+
+                if has_code_changes:
+                    # Code modification flow: push → PR → close
+                    await self._tracker.push_branch(ws_path, workspace.branch)
+                    pr = await self._tracker.create_pr(
+                        title=f"fix: {issue.title} (#{issue.number})",
+                        head=workspace.branch,
+                        base="main",
+                        body=f"Automatically resolved by JHSymphony.\n\nCloses #{issue.number}",
+                    )
+                    pr_url = pr.get("html_url", "")
+                    await self._tracker.post_comment(
+                        issue.number,
+                        f"**JHSymphony** completed this issue.\n- PR: {pr_url}\n- Run: `{run_id}`",
+                    )
+                    await self._tracker.close_issue(issue.number)
+                    logger.info("Created PR #%s and closed issue #%d", pr.get("number"), issue.number)
+                else:
+                    # Analysis/question flow: collect agent output → post as comment → close
+                    events = await self._storage.list_events(run_id)
+                    response_parts = []
+                    for evt in events:
+                        evt_type = evt.get("type") or evt.get("event_type", "")
+                        if evt_type == "message.delta":
+                            text = evt.get("payload", {}).get("text", "")
+                            if text.strip():
+                                response_parts.append(text)
+                    agent_response = "\n".join(response_parts) if response_parts else "Analysis completed."
+                    await self._tracker.post_comment(
+                        issue.number,
+                        f"## JHSymphony Analysis\n\n{agent_response}\n\n---\n*Run: `{run_id}`*",
+                    )
+                    await self._tracker.close_issue(issue.number)
+                    logger.info("Posted analysis comment and closed issue #%d (no code changes)", issue.number)
+
             except Exception:
                 logger.warning("Post-completion actions failed for issue #%d", issue.number, exc_info=True)
 
