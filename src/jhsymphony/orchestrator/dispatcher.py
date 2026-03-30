@@ -192,11 +192,21 @@ class Dispatcher:
                         cwd=ws_path, env=None, timeout_sec=10,
                     )
 
-                # Check if branch has any commits beyond base (main)
-                diff_from_main = await run_subprocess(
-                    ["git", "diff", "main...HEAD", "--quiet"], cwd=ws_path, env=None, timeout_sec=10,
+                # Detect default branch (main, master, proto, etc.)
+                default_branch_result = await run_subprocess(
+                    ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
+                    cwd=ws_path, env=None, timeout_sec=10,
                 )
-                has_code_changes = diff_from_main.returncode != 0
+                default_branch = default_branch_result.stdout.strip().replace("origin/", "") if default_branch_result.returncode == 0 else "main"
+                if not default_branch or default_branch == "HEAD":
+                    default_branch = "main"
+
+                # Check if branch has any file changes beyond base
+                diff_from_base = await run_subprocess(
+                    ["git", "diff", f"origin/{default_branch}...HEAD", "--quiet"],
+                    cwd=ws_path, env=None, timeout_sec=10,
+                )
+                has_code_changes = diff_from_base.returncode != 0
 
                 if has_code_changes:
                     # Code modification flow: push → PR → close
@@ -204,7 +214,7 @@ class Dispatcher:
                     pr = await self._tracker.create_pr(
                         title=f"fix: {issue.title} (#{issue.number})",
                         head=workspace.branch,
-                        base="main",
+                        base=default_branch,
                         body=f"Automatically resolved by JHSymphony.\n\nCloses #{issue.number}",
                     )
                     pr_url = pr.get("html_url", "")
