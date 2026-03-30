@@ -70,6 +70,14 @@ class GitHubTracker:
         if resp.status_code != 404:
             resp.raise_for_status()
 
+    async def check_approved(self, issue_number: int) -> bool:
+        """Check if an issue has the 'approved' label."""
+        url = f"{_API_BASE}/repos/{self._repo}/issues/{issue_number}/labels"
+        resp = await self._client.get(url)
+        resp.raise_for_status()
+        labels = [l["name"] for l in resp.json()]
+        return "approved" in labels
+
     async def close_issue(self, issue_number: int) -> None:
         url = f"{_API_BASE}/repos/{self._repo}/issues/{issue_number}"
         resp = await self._client.patch(url, json={"state": "closed"})

@@ -32,21 +32,40 @@ class Scheduler:
             candidates = await self._tracker.fetch_candidates()
             active_issues = await self._storage.list_issues()
             active_ids = {i.id for i in active_issues if i.state.is_active()}
+
             await self._reconciler.reconcile(current_candidates=candidates, active_issue_ids=active_ids)
+
+            # Dispatch new candidates
             for candidate in candidates:
                 if candidate.id in active_ids:
                     continue
                 existing = await self._storage.get_issue(candidate.id)
                 if existing:
-                    # Skip if already active OR already completed/failed
                     if existing.state.is_active() or existing.state in (
                         IssueState.COMPLETED, IssueState.FAILED, IssueState.CANCELLED,
                     ):
                         continue
                 await self._storage.upsert_issue(candidate)
                 await self._dispatcher.dispatch(candidate)
+
+            # Check awaiting_approval issues for approved label
+            await self._check_approvals(active_issues)
+
         except Exception:
             logger.exception("Error in scheduler tick")
+
+    async def _check_approvals(self, issues: list[Issue]) -> None:
+        """Poll issues in AWAITING_APPROVAL state for the 'approved' label."""
+        for issue in issues:
+            if issue.state != IssueState.AWAITING_APPROVAL:
+                continue
+            try:
+                is_approved = await self._tracker.check_approved(issue.number)
+                if is_approved:
+                    logger.info("Issue %s (#%d) has been approved!", issue.id, issue.number)
+                    await self._dispatcher.dispatch_approved(issue)
+            except Exception:
+                logger.debug("Failed to check approval for issue %s", issue.id, exc_info=True)
 
     async def run(self) -> None:
         self._running = True

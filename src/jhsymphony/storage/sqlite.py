@@ -70,6 +70,29 @@ CREATE TABLE IF NOT EXISTS usage (
 
 CREATE INDEX IF NOT EXISTS idx_usage_run_id ON usage (run_id);
 CREATE INDEX IF NOT EXISTS idx_usage_recorded_at ON usage (recorded_at);
+
+CREATE TABLE IF NOT EXISTS qa_cache (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo            TEXT NOT NULL,
+    question_hash   TEXT NOT NULL,
+    category_major  TEXT NOT NULL DEFAULT '',
+    category_mid    TEXT NOT NULL DEFAULT '',
+    category_minor  TEXT NOT NULL DEFAULT '',
+    subject         TEXT NOT NULL,
+    question        TEXT NOT NULL,
+    answer          TEXT NOT NULL,
+    issue_number    INTEGER,
+    created_at      TEXT NOT NULL,
+    hit_count       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_qa_repo ON qa_cache (repo);
+CREATE INDEX IF NOT EXISTS idx_qa_hash ON qa_cache (question_hash);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS qa_cache_fts USING fts5(
+    subject, question, answer,
+    content='qa_cache', content_rowid='id'
+);
 """
 
 
@@ -343,3 +366,84 @@ class SQLiteStorage:
             }
             for r in rows
         ]
+
+    # --------------------------------------------------------------- qa_cache
+
+    @staticmethod
+    def _qa_row_to_dict(row) -> dict:
+        return {
+            "id": row["id"],
+            "repo": row["repo"],
+            "category_major": row["category_major"],
+            "category_mid": row["category_mid"],
+            "category_minor": row["category_minor"],
+            "subject": row["subject"],
+            "question": row["question"],
+            "answer": row["answer"],
+            "issue_number": row["issue_number"],
+            "hit_count": row["hit_count"],
+            "created_at": row["created_at"],
+        }
+
+    async def search_qa_cache(self, repo: str, query: str, limit: int = 3) -> list[dict]:
+        """Search Q&A cache using FTS5. Returns top matches."""
+        import hashlib
+        query_hash = hashlib.sha256(query.strip().lower().encode()).hexdigest()[:16]
+
+        # Exact hash match first
+        async with self._db.execute(
+            "SELECT * FROM qa_cache WHERE repo = ? AND question_hash = ? LIMIT 1",
+            (repo, query_hash),
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            await self._db.execute("UPDATE qa_cache SET hit_count = hit_count + 1 WHERE id = ?", (row["id"],))
+            await self._db.commit()
+            return [self._qa_row_to_dict(row)]
+
+        # FTS5 search
+        try:
+            async with self._db.execute(
+                """SELECT qa_cache.*, rank FROM qa_cache_fts
+                   JOIN qa_cache ON qa_cache.id = qa_cache_fts.rowid
+                   WHERE qa_cache.repo = ? AND qa_cache_fts MATCH ?
+                   ORDER BY rank LIMIT ?""",
+                (repo, query, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+            results = [self._qa_row_to_dict(r) for r in rows]
+            for r in results:
+                await self._db.execute("UPDATE qa_cache SET hit_count = hit_count + 1 WHERE id = ?", (r["id"],))
+            if results:
+                await self._db.commit()
+            return results
+        except Exception:
+            return []
+
+    async def insert_qa_cache(
+        self, repo: str, question: str, answer: str,
+        category_major: str = "", category_mid: str = "", category_minor: str = "",
+        subject: str = "", issue_number: int | None = None,
+    ) -> int:
+        """Insert a Q&A entry and update FTS index."""
+        import hashlib
+        question_hash = hashlib.sha256(question.strip().lower().encode()).hexdigest()[:16]
+        if not subject:
+            subject = question[:100]
+
+        async with self._db.execute(
+            """INSERT INTO qa_cache
+               (repo, question_hash, category_major, category_mid, category_minor, subject, question, answer, issue_number, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (repo, question_hash, category_major, category_mid, category_minor,
+             subject, question, answer, issue_number, _now_iso()),
+        ) as cur:
+            row_id = cur.lastrowid
+
+        # Update FTS index
+        await self._db.execute(
+            "INSERT INTO qa_cache_fts(rowid, subject, question, answer) VALUES (?, ?, ?, ?)",
+            (row_id, subject, question, answer),
+        )
+        await self._db.commit()
+        return row_id

@@ -12,6 +12,8 @@ def _utc_now() -> datetime:
 
 class IssueState(StrEnum):
     PENDING = "pending"
+    ANALYZING = "analyzing"
+    AWAITING_APPROVAL = "awaiting_approval"
     LEASED = "leased"
     PREPARING = "preparing"
     RUNNING = "running"
@@ -24,11 +26,23 @@ class IssueState(StrEnum):
     def is_active(self) -> bool:
         return self in {
             IssueState.PENDING,
+            IssueState.ANALYZING,
+            IssueState.AWAITING_APPROVAL,
             IssueState.LEASED,
             IssueState.PREPARING,
             IssueState.RUNNING,
             IssueState.REVIEWING,
             IssueState.RETRY_WAIT,
+        }
+
+    def consumes_slot(self) -> bool:
+        """Whether this state uses an agent execution slot."""
+        return self in {
+            IssueState.ANALYZING,
+            IssueState.LEASED,
+            IssueState.PREPARING,
+            IssueState.RUNNING,
+            IssueState.REVIEWING,
         }
 
 
