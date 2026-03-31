@@ -180,11 +180,13 @@ class Dispatcher:
                 if cache_hits:
                     cached = cache_hits[0]
                     await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
+                    category_parts = [p for p in [cached['category_major'], cached['category_mid'], cached['category_minor']] if p]
+                    category_str = " > ".join(category_parts) if category_parts else "General"
+                    ref_issue = f"#{cached['issue_number']}" if cached['issue_number'] else "N/A"
                     await self._tracker.post_comment(
                         issue.number,
-                        f"## JHSymphony Answer (cached)\n\n{cached['answer']}\n\n---\n"
-                        f"*Category: {cached['category_major']}/{cached['category_mid']}/{cached['category_minor']}*\n"
-                        f"*Cache hit from issue #{cached['issue_number'] or 'N/A'}*",
+                        f"{cached['answer']}\n\n---\n"
+                        f"<sub>Answered from cache | Category: {category_str} | Ref: {ref_issue}</sub>",
                     )
                     await self._tracker.close_issue(issue.number)
                     await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
@@ -209,18 +211,34 @@ class Dispatcher:
                 f"You are analyzing GitHub issue #{issue.number}: {issue.title}\n\n"
                 f"{issue.body}\n\n"
                 f"Determine if this issue requires CODE CHANGES or is a QUESTION/ANALYSIS request.\n\n"
+                f"IMPORTANT: Your response will be posted as a GitHub issue comment.\n"
+                f"Format your response in clean, readable GitHub-flavored Markdown:\n"
+                f"- Use ## headers to separate major sections\n"
+                f"- Use ### for subsections\n"
+                f"- Use bullet points (- or *) for lists\n"
+                f"- Use `backticks` for file names, function names, variable names, error codes\n"
+                f"- Use ```language code blocks for code snippets\n"
+                f"- Use > blockquotes for key findings or conclusions\n"
+                f"- Use **bold** for emphasis on critical points\n"
+                f"- Keep paragraphs short (2-3 sentences max)\n"
+                f"- Add blank lines between sections for readability\n\n"
                 f"If this is a QUESTION or ANALYSIS request (no code changes needed):\n"
-                f"- Read and analyze the relevant code in the current directory\n"
-                f"- Provide a thorough, detailed answer\n"
+                f"Structure your response as:\n"
+                f"## Summary (1-2 sentence overview)\n"
+                f"## Analysis (detailed findings with code references)\n"
+                f"## Root Cause (if applicable)\n"
+                f"## Recommendation (actionable next steps)\n"
                 f"- Do NOT modify any files\n\n"
                 f"If CODE CHANGES are needed:\n"
                 f"- Do NOT implement the changes yet\n"
-                f"- Instead, analyze the codebase and write a detailed development plan:\n"
-                f"  1. Summary of what needs to change\n"
-                f"  2. Files that will be affected\n"
-                f"  3. Implementation approach\n"
-                f"  4. Testing strategy\n"
-                f"  5. Potential risks or considerations\n"
+                f"Structure your response as:\n"
+                f"## Summary (what needs to change and why)\n"
+                f"## Affected Files\n"
+                f"| File | Change Type | Description |\n"
+                f"|------|------------|-------------|\n"
+                f"## Implementation Plan (step by step)\n"
+                f"## Testing Strategy\n"
+                f"## Risks & Considerations\n"
                 f"- Do NOT modify any files\n\n"
                 f"Work in the current directory."
             )
@@ -244,7 +262,7 @@ class Dispatcher:
                     # Question flow: post answer → cache → close
                     await self._tracker.post_comment(
                         issue.number,
-                        f"## JHSymphony Analysis\n\n{agent_response}\n\n---\n*Run: `{run_id}`*",
+                        f"{agent_response}\n\n---\n<sub>Analyzed by JHSymphony | Run: `{run_id}`</sub>",
                     )
                     # Cache the Q&A for future use
                     try:
@@ -265,9 +283,9 @@ class Dispatcher:
                     # Development request: post plan → await approval
                     await self._tracker.post_comment(
                         issue.number,
-                        f"## JHSymphony Development Plan\n\n{agent_response}\n\n---\n"
-                        f"**To approve this plan**, add the `approved` label to this issue.\n"
-                        f"*Run: `{run_id}`*",
+                        f"{agent_response}\n\n---\n"
+                        f"> **Action Required**: Add the `approved` label to approve this plan and start implementation.\n\n"
+                        f"<sub>Analyzed by JHSymphony | Run: `{run_id}`</sub>",
                     )
                     await self._tracker.add_labels(issue.number, ["waiting-approval"])
                     await self._storage.update_issue_state(issue.id, IssueState.AWAITING_APPROVAL)
