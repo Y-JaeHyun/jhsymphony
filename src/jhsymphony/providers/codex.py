@@ -36,6 +36,17 @@ class CodexProvider:
             "process": None,
         }
 
+    @staticmethod
+    async def _drain_stderr(proc: asyncio.subprocess.Process) -> None:
+        """Read and discard stderr to prevent pipe buffer deadlock."""
+        try:
+            while True:
+                chunk = await proc.stderr.read(4096)
+                if not chunk:
+                    break
+        except Exception:
+            pass
+
     async def run_turn(self, session: dict[str, Any], prompt: str) -> AsyncIterator[AgentEvent]:
         cmd = [
             self._command,
@@ -59,6 +70,9 @@ class CodexProvider:
             )
             session["process"] = proc
             yield AgentEvent(type=EventType.SESSION_STARTED, data={"pid": proc.pid})
+
+            # Drain stderr concurrently to prevent pipe buffer deadlock
+            stderr_task = asyncio.create_task(self._drain_stderr(proc))
 
             async for line in proc.stdout:
                 text = line.decode(errors="replace").strip()
@@ -85,11 +99,24 @@ class CodexProvider:
                     else:
                         content = msg.get("content") or msg.get("text") or msg.get("message", "")
                         if content:
-                            yield AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": str(content)})
+                            # Handle list-of-blocks format: [{"type": "text", "text": "..."}]
+                            if isinstance(content, list):
+                                text_parts = [
+                                    b.get("text", "") for b in content
+                                    if isinstance(b, dict) and b.get("type") in ("text", "output_text")
+                                ]
+                                text_str = "\n".join(t for t in text_parts if t.strip())
+                                if text_str:
+                                    yield AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": text_str})
+                            else:
+                                yield AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": str(content)})
+                        elif msg_type:
+                            logger.debug("CodexProvider: unhandled JSON type=%s keys=%s", msg_type, list(msg.keys()))
                 except json.JSONDecodeError:
                     yield AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": text})
 
             await proc.wait()
+            stderr_task.cancel()
             yield AgentEvent(
                 type=EventType.COMPLETED,
                 data={"reason": "done" if proc.returncode == 0 else "error", "exit_code": proc.returncode},

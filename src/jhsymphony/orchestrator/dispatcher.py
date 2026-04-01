@@ -131,16 +131,41 @@ class Dispatcher:
         return seq
 
     async def _collect_agent_response(self, run_id: str) -> str:
-        """Collect message.delta events into a single response string."""
+        """Collect agent text output from message.delta and tool_result events."""
         events = await self._storage.list_events(run_id)
-        parts = []
+        message_parts: list[str] = []
+        last_tool_result: str = ""
+
         for evt in events:
             evt_type = evt.get("type") or evt.get("event_type", "")
+            payload = evt.get("payload", {})
+
             if evt_type == "message.delta":
-                text = evt.get("payload", {}).get("text", "")
+                text = payload.get("text", "")
                 if text.strip():
-                    parts.append(text)
-        return "\n".join(parts) if parts else "Analysis completed."
+                    message_parts.append(text)
+            elif evt_type == "tool.result":
+                # Keep track of the last substantial tool result as fallback
+                content = payload.get("content", "")
+                if isinstance(content, list):
+                    # Handle list-of-blocks format: [{"type": "text", "text": "..."}]
+                    text_parts = [
+                        b.get("text", "") for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    ]
+                    content = "\n".join(t for t in text_parts if t.strip())
+                if isinstance(content, str) and len(content.strip()) > 100:
+                    last_tool_result = content.strip()
+
+        if message_parts:
+            return "\n".join(message_parts)
+
+        if last_tool_result:
+            logger.warning("Run %s: no message.delta events, falling back to last tool_result", run_id)
+            return last_tool_result
+
+        logger.warning("Run %s: no agent text output collected", run_id)
+        return "Analysis completed."
 
     async def _detect_default_branch(self, ws_path: str) -> str:
         result = await run_subprocess(

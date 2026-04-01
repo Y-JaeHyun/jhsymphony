@@ -96,6 +96,58 @@ async def test_dispatch_returns_none_when_cannot_dispatch(dispatcher, storage):
     assert result is None
 
 
+async def test_collect_agent_response_message_delta(dispatcher, storage):
+    """message.delta events should be collected as the response."""
+    run_id = "run-msg"
+    await storage.insert_run(
+        Run(id=run_id, issue_id="gh-1", provider="codex", status=RunStatus.RUNNING)
+    )
+    await storage.insert_event(run_id, 0, "session.started", {"pid": 1})
+    await storage.insert_event(run_id, 1, "message.delta", {"text": "## Summary"})
+    await storage.insert_event(run_id, 2, "message.delta", {"text": "This is the plan."})
+    result = await dispatcher._collect_agent_response(run_id)
+    assert "## Summary" in result
+    assert "This is the plan." in result
+
+
+async def test_collect_agent_response_fallback_to_tool_result(dispatcher, storage):
+    """When no message.delta, should fall back to last substantial tool_result."""
+    run_id = "run-tool"
+    await storage.insert_run(
+        Run(id=run_id, issue_id="gh-1", provider="codex", status=RunStatus.RUNNING)
+    )
+    await storage.insert_event(run_id, 0, "tool.call", {"tool": "Read", "input": {}})
+    long_text = "## Detailed Analysis\n" + "x" * 200
+    await storage.insert_event(run_id, 1, "tool.result", {"content": long_text})
+    result = await dispatcher._collect_agent_response(run_id)
+    assert "Detailed Analysis" in result
+    assert result != "Analysis completed."
+
+
+async def test_collect_agent_response_tool_result_list_format(dispatcher, storage):
+    """tool_result with list-of-blocks content format should be handled."""
+    run_id = "run-list"
+    await storage.insert_run(
+        Run(id=run_id, issue_id="gh-1", provider="codex", status=RunStatus.RUNNING)
+    )
+    blocks = [{"type": "text", "text": "## Plan\n" + "y" * 200}]
+    await storage.insert_event(run_id, 0, "session.started", {"pid": 1})
+    await storage.insert_event(run_id, 1, "tool.result", {"content": blocks})
+    result = await dispatcher._collect_agent_response(run_id)
+    assert "## Plan" in result
+
+
+async def test_collect_agent_response_empty_fallback(dispatcher, storage):
+    """With no useful events, should return the fallback string."""
+    run_id = "run-empty"
+    await storage.insert_run(
+        Run(id=run_id, issue_id="gh-1", provider="codex", status=RunStatus.RUNNING)
+    )
+    await storage.insert_event(run_id, 0, "session.started", {"pid": 123})
+    result = await dispatcher._collect_agent_response(run_id)
+    assert result == "Analysis completed."
+
+
 async def test_cancel_run(dispatcher, storage):
     issue = Issue(id="gh-1", number=1, repo="o/r", title="Fix bug", labels=["jhsymphony"])
     await storage.upsert_issue(issue)

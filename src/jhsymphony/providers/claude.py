@@ -66,6 +66,17 @@ class ClaudeProvider:
             return AgentEvent(type=EventType.ERROR, data={"error": msg.get("message", str(msg))})
         return None
 
+    @staticmethod
+    async def _drain_stderr(proc: asyncio.subprocess.Process) -> None:
+        """Read and discard stderr to prevent pipe buffer deadlock."""
+        try:
+            while True:
+                chunk = await proc.stderr.read(4096)
+                if not chunk:
+                    break
+        except Exception:
+            pass
+
     async def run_turn(self, session: dict[str, Any], prompt: str) -> AsyncIterator[AgentEvent]:
         cmd = [
             self._command,
@@ -91,6 +102,9 @@ class ClaudeProvider:
             session["process"] = proc
             yield AgentEvent(type=EventType.SESSION_STARTED, data={"pid": proc.pid})
 
+            # Drain stderr concurrently to prevent pipe buffer deadlock
+            stderr_task = asyncio.create_task(self._drain_stderr(proc))
+
             async for line in proc.stdout:
                 text = line.decode(errors="replace").strip()
                 if not text:
@@ -104,6 +118,7 @@ class ClaudeProvider:
                     yield AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": text})
 
             await proc.wait()
+            stderr_task.cancel()
             yield AgentEvent(
                 type=EventType.COMPLETED,
                 data={"reason": "done" if proc.returncode == 0 else "error", "exit_code": proc.returncode},
