@@ -85,7 +85,8 @@ class Dispatcher:
             return None
 
         run_id = str(uuid.uuid4())
-        provider = self._router.select(issue.labels)
+        # Always use Claude for implementation, fallback to label-based routing
+        provider = self._router.get("claude") or self._router.select(issue.labels)
         _name_attr = getattr(provider, "name", None)
         provider_name = _name_attr if isinstance(_name_attr, str) else type(provider).__name__
 
@@ -96,7 +97,7 @@ class Dispatcher:
         self._tasks[run_id] = task
         task.add_done_callback(lambda t: self._tasks.pop(run_id, None))
 
-        logger.info("Dispatched implementation run %s for approved issue %s", run_id, issue.id)
+        logger.info("Dispatched implementation run %s for approved issue %s using Claude", run_id, issue.id)
         return run_id
 
     # ── Agent execution helpers ──

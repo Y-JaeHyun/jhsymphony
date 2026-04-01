@@ -225,6 +225,41 @@ async def test_extract_admin_decisions_ignores_bot_comments(dispatcher):
     assert "ignore this" not in raw
 
 
+async def test_dispatch_approved_uses_claude(storage, mock_workspace_mgr, mock_tracker):
+    """dispatch_approved should always use Claude, regardless of issue labels."""
+    claude_provider = AsyncMock()
+    claude_provider.name = "claude"
+
+    async def fake_run_turn(session, prompt):
+        from jhsymphony.providers.base import AgentEvent, EventType
+        yield AgentEvent(type=EventType.COMPLETED, data={"reason": "done"})
+
+    claude_provider.run_turn = fake_run_turn
+
+    codex_provider = AsyncMock()
+    codex_provider.name = "codex"
+
+    router = MagicMock()
+    router.select.return_value = codex_provider
+    router.get.return_value = claude_provider
+
+    lease_mgr = LeaseManager(storage=storage, owner_id="test", ttl_sec=60)
+    disp = Dispatcher(
+        storage=storage, lease_manager=lease_mgr, workspace_manager=mock_workspace_mgr,
+        provider_router=router, tracker=mock_tracker,
+        bot_login="test-bot",
+    )
+
+    issue = Issue(id="gh-claude", number=7, repo="o/r", title="Test", labels=["use-codex"])
+    await storage.upsert_issue(issue)
+    run_id = await disp.dispatch_approved(issue)
+    assert run_id is not None
+
+    run = await storage.get_run(run_id)
+    assert run.provider == "claude"
+    router.get.assert_called_with("claude")
+
+
 async def test_cancel_run(dispatcher, storage):
     issue = Issue(id="gh-1", number=1, repo="o/r", title="Fix bug", labels=["jhsymphony"])
     await storage.upsert_issue(issue)
