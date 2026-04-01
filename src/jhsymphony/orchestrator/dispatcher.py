@@ -26,6 +26,7 @@ class Dispatcher:
         max_concurrent: int = 4,
         budget_daily_limit: float = 100.0,
         budget_per_run_limit: float = 20.0,
+        bot_login: str = "",
     ) -> None:
         self._storage = storage
         self._lease_manager = lease_manager
@@ -35,6 +36,7 @@ class Dispatcher:
         self._max_concurrent = max_concurrent
         self._budget_daily_limit = budget_daily_limit
         self._budget_per_run_limit = budget_per_run_limit
+        self._bot_login = bot_login
         self._tasks: dict[str, asyncio.Task] = {}
 
     @property
@@ -354,17 +356,52 @@ class Dispatcher:
             except Exception:
                 pass
 
-            prompt = (
-                f"You are implementing GitHub issue #{issue.number}: {issue.title}\n\n"
-                f"{issue.body}\n\n"
-                f"This issue has been approved for implementation. Do the following:\n"
-                f"1. Read the existing code to understand the codebase\n"
-                f"2. Implement the requested changes\n"
-                f"3. Write or update tests\n"
-                f"4. Run the tests to make sure they pass\n"
-                f"5. Commit your changes with a descriptive message\n\n"
-                f"Work in the current directory. Do not ask questions — just implement."
+            # Collect Phase 1 analysis
+            analysis_text = ""
+            analysis_comment_id = None
+            analysis_run = await self._storage.get_analysis_run(issue.id)
+            if analysis_run:
+                analysis_text = await self._collect_agent_response(analysis_run.id)
+                analysis_comment_id = analysis_run.analysis_comment_id
+
+            # Collect admin decisions from comments
+            admin_decisions_text = ""
+            decisions_summary = ""
+            if self._bot_login:
+                comments = await self._tracker.fetch_comments(issue.number)
+                decisions, raw_admin = self._extract_admin_decisions(
+                    comments, self._bot_login, analysis_comment_id
+                )
+                if raw_admin:
+                    admin_decisions_text = raw_admin
+                if decisions:
+                    decisions_summary = "\n".join(
+                        f"- DECISION-{k}: {v}" for k, v in sorted(decisions.items())
+                    )
+
+            # Build context-rich implementation prompt
+            prompt_parts = [
+                f"You are implementing GitHub issue #{issue.number}: {issue.title}\n",
+                f"## Original Issue\n{issue.body}\n",
+            ]
+            if analysis_text and analysis_text != "Analysis completed.":
+                prompt_parts.append(f"## Analysis Plan (from Phase 1)\n{analysis_text}\n")
+            if decisions_summary:
+                prompt_parts.append(f"## Admin Decisions\n{decisions_summary}\n")
+            if admin_decisions_text:
+                prompt_parts.append(f"## Admin Comments (raw)\n{admin_decisions_text}\n")
+            prompt_parts.append(
+                "Implement the changes following the analysis plan above.\n"
+                "Where the analysis identified DECISION points, follow the admin's chosen option.\n"
+                "Steps:\n"
+                "1. Read relevant code to understand the codebase\n"
+                "2. Implement changes per the plan and decisions\n"
+                "3. Write or update tests\n"
+                "4. Run tests\n"
+                "5. Commit with descriptive messages\n\n"
+                "Work in the current directory. Do not ask questions — just implement."
             )
+            prompt = "\n".join(prompt_parts)
 
             await self._run_agent(run_id, issue, provider, prompt, workspace)
 
@@ -448,6 +485,39 @@ class Dispatcher:
             "\n\n---\n"
             "> **Action Required**: Add the `approved` label to approve this plan and start implementation.\n"
         )
+
+    _DECISION_RE = re.compile(r"DECISION-(\d+)\s*:\s*(.+)", re.IGNORECASE)
+
+    @staticmethod
+    def _extract_admin_decisions(
+        comments: list[dict], bot_login: str, analysis_comment_id: int | None = None
+    ) -> tuple[dict[str, str], str]:
+        """Extract admin decisions from issue comments after the analysis comment."""
+        # Find the analysis comment by stored comment ID (reliable anchor)
+        analysis_idx = -1
+        for i, c in enumerate(comments):
+            if c.get("id") == analysis_comment_id:
+                analysis_idx = i
+
+        # Fallback: find last bot comment with DECISION patterns
+        if analysis_idx < 0:
+            for i, c in enumerate(comments):
+                if c["author"] == bot_login and "DECISION-" in c["body"]:
+                    analysis_idx = i
+
+        # Collect admin comments after analysis
+        admin_comments = []
+        if analysis_idx >= 0:
+            for c in comments[analysis_idx + 1:]:
+                if c["author"] != bot_login:
+                    admin_comments.append(c["body"])
+
+        raw_text = "\n\n".join(admin_comments)
+        decisions = {}
+        for m in Dispatcher._DECISION_RE.finditer(raw_text):
+            decisions[m.group(1)] = m.group(2).strip()
+
+        return decisions, raw_text
 
     async def cancel_run(self, run_id: str) -> None:
         task = self._tasks.get(run_id)

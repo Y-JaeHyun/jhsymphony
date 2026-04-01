@@ -60,6 +60,7 @@ def dispatcher(storage, mock_workspace_mgr, mock_router, mock_tracker):
         max_concurrent=2,
         budget_daily_limit=50.0,
         budget_per_run_limit=10.0,
+        bot_login="test-bot",
     )
 
 
@@ -172,6 +173,56 @@ async def test_no_decision_footer_when_no_decisions(dispatcher, storage):
     footer = dispatcher._build_plan_footer(response)
     assert "결정이 필요한 항목이 있습니다" not in footer
     assert "Action Required" in footer
+
+
+async def test_extract_admin_decisions_by_comment_id(dispatcher):
+    comments = [
+        {"id": 100, "author": "bot", "body": "## Plan\n### DECISION-1: DB\n> A or B", "created_at": "2026-01-01T00:00:00Z"},
+        {"id": 101, "author": "admin", "body": "DECISION-1: A\nWe prefer postgres", "created_at": "2026-01-01T01:00:00Z"},
+    ]
+    decisions, raw = Dispatcher._extract_admin_decisions(comments, "bot", analysis_comment_id=100)
+    assert decisions["1"] == "A"
+    assert "We prefer postgres" in raw
+
+
+async def test_extract_admin_decisions_fallback_to_bot_pattern(dispatcher):
+    comments = [
+        {"id": 100, "author": "bot", "body": "## Plan\n### DECISION-1: DB\n> A or B", "created_at": "2026-01-01T00:00:00Z"},
+        {"id": 101, "author": "admin", "body": "DECISION-1: B\nGo with mysql", "created_at": "2026-01-01T01:00:00Z"},
+    ]
+    decisions, raw = Dispatcher._extract_admin_decisions(comments, "bot", analysis_comment_id=999)
+    assert decisions["1"] == "B"
+
+
+async def test_extract_admin_decisions_multiple(dispatcher):
+    comments = [
+        {"id": 100, "author": "bot", "body": "DECISION-1: X\nDECISION-2: Y", "created_at": "2026-01-01T00:00:00Z"},
+        {"id": 101, "author": "admin", "body": "DECISION-1: A\nDECISION-2: B\nExtra context here", "created_at": "2026-01-01T01:00:00Z"},
+    ]
+    decisions, raw = Dispatcher._extract_admin_decisions(comments, "bot", analysis_comment_id=100)
+    assert decisions["1"] == "A"
+    assert decisions["2"] == "B"
+
+
+async def test_extract_admin_decisions_no_decisions(dispatcher):
+    comments = [
+        {"id": 100, "author": "bot", "body": "## Plan\nNo decisions needed", "created_at": "2026-01-01T00:00:00Z"},
+        {"id": 101, "author": "admin", "body": "Looks good!", "created_at": "2026-01-01T01:00:00Z"},
+    ]
+    decisions, raw = Dispatcher._extract_admin_decisions(comments, "bot", analysis_comment_id=100)
+    assert decisions == {}
+    assert "Looks good!" in raw
+
+
+async def test_extract_admin_decisions_ignores_bot_comments(dispatcher):
+    comments = [
+        {"id": 100, "author": "bot", "body": "DECISION-1: X", "created_at": "2026-01-01T00:00:00Z"},
+        {"id": 101, "author": "bot", "body": "DECISION-1: ignore this", "created_at": "2026-01-01T01:00:00Z"},
+        {"id": 102, "author": "admin", "body": "DECISION-1: A", "created_at": "2026-01-01T02:00:00Z"},
+    ]
+    decisions, raw = Dispatcher._extract_admin_decisions(comments, "bot", analysis_comment_id=100)
+    assert decisions["1"] == "A"
+    assert "ignore this" not in raw
 
 
 async def test_cancel_run(dispatcher, storage):
