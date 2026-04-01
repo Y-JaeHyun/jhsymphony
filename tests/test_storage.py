@@ -98,3 +98,21 @@ async def test_acquire_expired_lease(storage):
     assert acquired is True
     stolen = await storage.acquire_lease("gh-1", "worker-2", ttl_sec=60)
     assert stolen is True
+
+
+async def test_upsert_and_get_issue_body(storage):
+    issue = Issue(id="gh-body", number=10, repo="o/r", title="Test Body", body="This is the issue body text.")
+    await storage.upsert_issue(issue)
+    result = await storage.get_issue("gh-body")
+    assert result is not None
+    assert result.body == "This is the issue body text."
+
+
+async def test_upsert_issue_body_preserved_on_update(storage):
+    issue = Issue(id="gh-body2", number=11, repo="o/r", title="T", body="Original body")
+    await storage.upsert_issue(issue)
+    issue.state = IssueState.RUNNING
+    issue.body = "Original body"
+    await storage.upsert_issue(issue)
+    result = await storage.get_issue("gh-body2")
+    assert result.body == "Original body"

@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS issues (
     number      INTEGER NOT NULL,
     repo        TEXT NOT NULL,
     title       TEXT NOT NULL,
+    body        TEXT NOT NULL DEFAULT '',
     labels      TEXT NOT NULL DEFAULT '[]',
     state       TEXT NOT NULL DEFAULT 'pending',
     priority    INTEGER NOT NULL DEFAULT 0,
@@ -115,6 +116,7 @@ def _row_to_issue(row: aiosqlite.Row) -> Issue:
         number=row["number"],
         repo=row["repo"],
         title=row["title"],
+        body=row["body"],
         labels=json.loads(row["labels"]),
         state=IssueState(row["state"]),
         priority=row["priority"],
@@ -160,12 +162,13 @@ class SQLiteStorage:
     async def upsert_issue(self, issue: Issue) -> None:
         await self._db.execute(
             """
-            INSERT INTO issues (id, number, repo, title, labels, state, priority, provider, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO issues (id, number, repo, title, body, labels, state, priority, provider, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 number     = excluded.number,
                 repo       = excluded.repo,
                 title      = excluded.title,
+                body       = excluded.body,
                 labels     = excluded.labels,
                 state      = excluded.state,
                 priority   = excluded.priority,
@@ -177,6 +180,7 @@ class SQLiteStorage:
                 issue.number,
                 issue.repo,
                 issue.title,
+                issue.body,
                 json.dumps(issue.labels),
                 issue.state.value,
                 issue.priority,
