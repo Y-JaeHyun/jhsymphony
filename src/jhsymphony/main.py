@@ -64,6 +64,9 @@ async def run_app(config_path: Path, dashboard: bool = True) -> None:
     )
 
     providers = _build_providers(config)
+    if "claude" not in providers:
+        console.print("[red bold]Error:[/red bold] Claude provider is required for implementation phase. Add providers.claude to config.")
+        return
     router = ProviderRouter(default_provider=config.providers.default, providers=providers, routing_rules=config.routing)
 
     owner_id = f"{platform.node()}-{uuid.uuid4().hex[:8]}"
@@ -75,6 +78,7 @@ async def run_app(config_path: Path, dashboard: bool = True) -> None:
         max_concurrent=config.orchestrator.max_concurrent_agents,
         budget_daily_limit=config.budget.daily_limit_usd,
         budget_per_run_limit=config.budget.per_run_limit_usd,
+        bot_login=config.tracker.bot_login,
     )
 
     reconciler = Reconciler(storage=storage, tracker=tracker, dispatcher=dispatcher)
