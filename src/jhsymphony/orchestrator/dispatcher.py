@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -264,6 +265,15 @@ class Dispatcher:
                 f"## Implementation Plan (step by step)\n"
                 f"## Testing Strategy\n"
                 f"## Risks & Considerations\n"
+                f"If there are items that require admin decisions before implementation,\n"
+                f"list them in a dedicated section using this exact format:\n\n"
+                f"## Decisions Required\n\n"
+                f"### DECISION-1: <short title>\n"
+                f"> <context explaining why this decision is needed>\n"
+                f"> - **A)** <option A description>\n"
+                f"> - **B)** <option B description>\n\n"
+                f"Repeat for each decision point (DECISION-2, DECISION-3, etc.).\n"
+                f"Use **bold** for each DECISION title to make them stand out.\n\n"
                 f"- Do NOT modify any files\n\n"
                 f"Work in the current directory."
             )
@@ -306,12 +316,10 @@ class Dispatcher:
                     logger.info("Posted analysis and closed question issue #%d", issue.number)
                 else:
                     # Development request: post plan → await approval
-                    await self._tracker.post_comment(
-                        issue.number,
-                        f"{agent_response}\n\n---\n"
-                        f"> **Action Required**: Add the `approved` label to approve this plan and start implementation.\n\n"
-                        f"<sub>Analyzed by JHSymphony | Run: `{run_id}`</sub>",
-                    )
+                    footer = self._build_plan_footer(agent_response)
+                    comment_body = f"{agent_response}{footer}\n\n<sub>Analyzed by JHSymphony | Run: `{run_id}`</sub>"
+                    comment_id = await self._tracker.post_comment(issue.number, comment_body)
+                    await self._storage.update_run_analysis_comment_id(run_id, comment_id)
                     await self._tracker.add_labels(issue.number, ["waiting-approval"])
                     await self._storage.update_issue_state(issue.id, IssueState.AWAITING_APPROVAL)
                     logger.info("Posted dev plan for issue #%d, awaiting approval", issue.number)
@@ -415,6 +423,31 @@ class Dispatcher:
                 return True
         score = sum(1 for s in question_signals if s in text)
         return score >= 2
+
+    _DECISION_PATTERN = re.compile(r"DECISION-\d+", re.IGNORECASE)
+
+    @staticmethod
+    def _build_plan_footer(agent_response: str) -> str:
+        """Build appropriate footer based on whether decisions are needed."""
+        has_decisions = bool(Dispatcher._DECISION_PATTERN.search(agent_response))
+        if has_decisions:
+            return (
+                "\n\n---\n"
+                "> **결정이 필요한 항목이 있습니다.**\n"
+                "> 아래 형식으로 이 이슈에 댓글을 남긴 후 `approved` 라벨을 추가해주세요:\n"
+                ">\n"
+                "> ```\n"
+                "> DECISION-1: A\n"
+                "> DECISION-2: B\n"
+                "> (필요시 추가 설명)\n"
+                "> ```\n"
+                ">\n"
+                "> **Action Required**: Add the `approved` label to approve this plan and start implementation.\n"
+            )
+        return (
+            "\n\n---\n"
+            "> **Action Required**: Add the `approved` label to approve this plan and start implementation.\n"
+        )
 
     async def cancel_run(self, run_id: str) -> None:
         task = self._tasks.get(run_id)

@@ -148,6 +148,32 @@ async def test_collect_agent_response_empty_fallback(dispatcher, storage):
     assert result == "Analysis completed."
 
 
+async def test_decision_footer_appended_when_decisions_present(dispatcher, storage):
+    """When agent response contains DECISION patterns, footer should include decision instructions."""
+    run_id = "run-footer"
+    await storage.insert_run(
+        Run(id=run_id, issue_id="gh-1", provider="codex", status=RunStatus.RUNNING)
+    )
+    await storage.insert_event(run_id, 1, "message.delta", {"text": "## Summary\nPlan here\n\n### DECISION-1: DB choice\n> Pick A or B"})
+    response = await dispatcher._collect_agent_response(run_id)
+    footer = dispatcher._build_plan_footer(response)
+    assert "DECISION-1:" in footer
+    assert "결정이 필요한 항목이 있습니다" in footer
+
+
+async def test_no_decision_footer_when_no_decisions(dispatcher, storage):
+    """When no DECISION patterns, use simple footer."""
+    run_id = "run-nofooter"
+    await storage.insert_run(
+        Run(id=run_id, issue_id="gh-1", provider="codex", status=RunStatus.RUNNING)
+    )
+    await storage.insert_event(run_id, 1, "message.delta", {"text": "## Summary\nSimple plan"})
+    response = await dispatcher._collect_agent_response(run_id)
+    footer = dispatcher._build_plan_footer(response)
+    assert "결정이 필요한 항목이 있습니다" not in footer
+    assert "Action Required" in footer
+
+
 async def test_cancel_run(dispatcher, storage):
     issue = Issue(id="gh-1", number=1, repo="o/r", title="Fix bug", labels=["jhsymphony"])
     await storage.upsert_issue(issue)
