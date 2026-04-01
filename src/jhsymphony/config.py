@@ -23,6 +23,7 @@ class ProjectConfig(BaseModel):
 class TrackerConfig(BaseModel):
     kind: str = "github"
     label: str = "jhsymphony"
+    bot_login: str = ""
     poll_interval_sec: int = 30
     webhook_secret: str | None = None
 

@@ -79,3 +79,13 @@ def test_config_budget(sample_config: Path):
     config = load_config(sample_config)
     assert config.budget.daily_limit_usd == 10.0
     assert config.budget.per_run_limit_usd == 5.0
+
+
+def test_tracker_config_bot_login(sample_config):
+    import yaml
+    raw = sample_config.read_text()
+    data = yaml.safe_load(raw)
+    data["tracker"]["bot_login"] = "Y-JaeHyun"
+    sample_config.write_text(yaml.dump(data))
+    config = load_config(sample_config)
+    assert config.tracker.bot_login == "Y-JaeHyun"
