@@ -152,7 +152,21 @@ class SQLiteStorage:
         self._db = await aiosqlite.connect(self._db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
+        await self._migrate(self._db)
         await self._db.commit()
+
+    @staticmethod
+    async def _migrate(db: aiosqlite.Connection) -> None:
+        """Add columns that may be missing from older databases."""
+        async with db.execute("PRAGMA table_info(issues)") as cur:
+            issue_cols = {row[1] for row in await cur.fetchall()}
+        if "body" not in issue_cols:
+            await db.execute("ALTER TABLE issues ADD COLUMN body TEXT NOT NULL DEFAULT ''")
+
+        async with db.execute("PRAGMA table_info(runs)") as cur:
+            run_cols = {row[1] for row in await cur.fetchall()}
+        if "analysis_comment_id" not in run_cols:
+            await db.execute("ALTER TABLE runs ADD COLUMN analysis_comment_id INTEGER")
 
     async def close(self) -> None:
         if self._db is not None:
