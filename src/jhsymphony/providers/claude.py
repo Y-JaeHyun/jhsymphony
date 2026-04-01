@@ -38,7 +38,7 @@ class ClaudeProvider:
 
     def _parse_event(self, msg: dict[str, Any]) -> AgentEvent | None:
         msg_type = msg.get("type", "")
-        if msg_type in ("assistant", "message"):
+        if msg_type in ("assistant", "message", "result"):
             content = msg.get("content", "")
             if isinstance(content, list):
                 text_parts = [
