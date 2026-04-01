@@ -179,13 +179,33 @@ class Dispatcher:
         branch = result.stdout.strip().replace("origin/", "") if result.returncode == 0 else "main"
         return branch if branch and branch != "HEAD" else "main"
 
-    async def _has_code_changes(self, ws_path: str, default_branch: str) -> bool:
-        # Auto-commit uncommitted changes
-        await run_subprocess(["git", "add", "-A"], cwd=ws_path, env=None, timeout_sec=10)
+    _JIRA_REF_RE = re.compile(r"(refs\s+#[A-Z]+-\d+)", re.IGNORECASE)
+
+    @staticmethod
+    def _extract_jira_ref(body: str) -> str:
+        """Extract 'refs #SERVER-1234' from the last line of issue body."""
+        lines = body.strip().splitlines()
+        if lines:
+            m = Dispatcher._JIRA_REF_RE.search(lines[-1])
+            if m:
+                return m.group(1)
+        return ""
+
+    async def _has_code_changes(self, ws_path: str, default_branch: str, issue: Issue | None = None) -> bool:
+        # Auto-commit uncommitted changes, excluding docs/
+        await run_subprocess(["git", "add", "-A", "--", ".", ":!docs/"], cwd=ws_path, env=None, timeout_sec=10)
         diff_staged = await run_subprocess(["git", "diff", "--cached", "--quiet"], cwd=ws_path, env=None, timeout_sec=10)
         if diff_staged.returncode != 0:
+            # Build commit message from issue context
+            if issue:
+                msg = f"feat: {issue.title} (#{issue.number})"
+                jira_ref = self._extract_jira_ref(issue.body)
+                if jira_ref:
+                    msg = f"{msg}\n\n{jira_ref}"
+            else:
+                msg = "feat: auto-committed by JHSymphony"
             await run_subprocess(
-                ["git", "commit", "-m", "feat: auto-committed by JHSymphony"],
+                ["git", "commit", "-m", msg],
                 cwd=ws_path, env=None, timeout_sec=10,
             )
         # Check diff from base
@@ -287,7 +307,7 @@ class Dispatcher:
             agent_response = await self._collect_agent_response(run_id)
             ws_path = str(workspace.path)
             default_branch = await self._detect_default_branch(ws_path)
-            has_changes = await self._has_code_changes(ws_path, default_branch)
+            has_changes = await self._has_code_changes(ws_path, default_branch, issue)
 
             if has_changes:
                 # Agent made code changes despite instructions — treat as question that got code changes
@@ -393,10 +413,15 @@ class Dispatcher:
                 prompt_parts.append(f"## Admin Comments (raw)\n{admin_decisions_text}\n")
             prompt_parts.append(
                 "Implement the changes following the analysis plan above.\n"
-                "Where the analysis identified DECISION points, follow the admin's chosen option.\n"
+                "Where the analysis identified DECISION points, follow the admin's chosen option.\n\n"
+                "CRITICAL RULES:\n"
+                "- You MUST implement ALL items from the analysis plan. Partial implementation is NOT acceptable.\n"
+                "- Implement ALL Affected Files listed in the plan.\n"
+                "- Implement ALL steps from the Implementation Plan section.\n"
+                "- Do NOT create planning documents or docs/ files. Go straight to code implementation.\n\n"
                 "Steps:\n"
                 "1. Read relevant code to understand the codebase\n"
-                "2. Implement changes per the plan and decisions\n"
+                "2. Implement changes per the plan and decisions — ALL items, not just the first one\n"
                 "3. Write or update tests\n"
                 "4. Run tests\n"
                 "5. Commit with descriptive messages\n\n"
@@ -409,10 +434,10 @@ class Dispatcher:
             await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
             ws_path = str(workspace.path)
             default_branch = await self._detect_default_branch(ws_path)
-            has_changes = await self._has_code_changes(ws_path, default_branch)
+            has_changes = await self._has_code_changes(ws_path, default_branch, issue)
 
             if has_changes:
-                await self._do_pr_flow(issue, run_id, workspace, default_branch)
+                await self._do_pr_flow(issue, run_id, workspace, default_branch, analysis_text)
             else:
                 await self._tracker.post_comment(
                     issue.number,
@@ -431,24 +456,56 @@ class Dispatcher:
         finally:
             await self._lease_manager.release(issue.id)
 
-    async def _do_pr_flow(self, issue: Issue, run_id: str, workspace: Any, default_branch: str) -> None:
-        """Push branch, create PR, close issue."""
+    async def _read_docs_files(self, ws_path: str) -> str:
+        """Read any docs/ files created by the agent for inclusion in PR body."""
+        import os
+        docs_dir = os.path.join(ws_path, "docs")
+        if not os.path.isdir(docs_dir):
+            return ""
+        parts = []
+        for root, _dirs, files in os.walk(docs_dir):
+            for fname in sorted(files):
+                if fname.endswith(".md"):
+                    fpath = os.path.join(root, fname)
+                    try:
+                        with open(fpath) as f:
+                            parts.append(f.read())
+                    except Exception:
+                        pass
+        return "\n\n---\n\n".join(parts)
+
+    async def _do_pr_flow(
+        self, issue: Issue, run_id: str, workspace: Any, default_branch: str, analysis_text: str = ""
+    ) -> None:
+        """Push branch, create PR (without closing issue)."""
         ws_path = str(workspace.path)
+
+        # Collect docs files for PR body before push
+        docs_content = await self._read_docs_files(ws_path)
+
         await self._tracker.push_branch(ws_path, workspace.branch)
+
+        # Build PR body with analysis plan and docs
+        body_parts = [f"## Analysis & Implementation Plan\n"]
+        if analysis_text and analysis_text != "Analysis completed.":
+            body_parts.append(analysis_text)
+        if docs_content:
+            body_parts.append(f"\n\n---\n\n## Implementation Details\n\n{docs_content}")
+        body_parts.append(f"\n\n---\n<sub>Implemented by JHSymphony | Issue: #{issue.number} | Run: `{run_id}`</sub>")
+
         pr = await self._tracker.create_pr(
-            title=f"fix: {issue.title} (#{issue.number})",
+            title=f"feat: {issue.title} (#{issue.number})",
             head=workspace.branch,
             base=default_branch,
-            body=f"Automatically resolved by JHSymphony.\n\nCloses #{issue.number}",
+            body="\n".join(body_parts),
         )
         pr_url = pr.get("html_url", "")
         await self._tracker.post_comment(
             issue.number,
-            f"**JHSymphony** completed this issue.\n- PR: {pr_url}\n- Run: `{run_id}`",
+            f"**JHSymphony** created a PR for this issue.\n- PR: {pr_url}\n- Run: `{run_id}`",
         )
-        await self._tracker.close_issue(issue.number)
         await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
-        logger.info("Created PR and closed issue #%d", issue.number)
+        logger.info("Created PR for issue #%d (issue left open)", issue.number)
 
     @staticmethod
     def _is_question_issue(issue: Issue) -> bool:
