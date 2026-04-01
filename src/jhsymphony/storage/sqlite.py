@@ -26,16 +26,17 @@ CREATE TABLE IF NOT EXISTS issues (
 CREATE INDEX IF NOT EXISTS idx_issues_state ON issues (state);
 
 CREATE TABLE IF NOT EXISTS runs (
-    id          TEXT PRIMARY KEY,
-    issue_id    TEXT NOT NULL,
-    provider    TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'starting',
-    attempt     INTEGER NOT NULL DEFAULT 1,
-    branch      TEXT,
-    pr_number   INTEGER,
-    started_at  TEXT NOT NULL,
-    ended_at    TEXT,
-    error       TEXT
+    id                    TEXT PRIMARY KEY,
+    issue_id              TEXT NOT NULL,
+    provider              TEXT NOT NULL,
+    status                TEXT NOT NULL DEFAULT 'starting',
+    attempt               INTEGER NOT NULL DEFAULT 1,
+    branch                TEXT,
+    pr_number             INTEGER,
+    analysis_comment_id   INTEGER,
+    started_at            TEXT NOT NULL,
+    ended_at              TEXT,
+    error                 TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_issue_id ON runs (issue_id);
@@ -135,6 +136,7 @@ def _row_to_run(row: aiosqlite.Row) -> Run:
         attempt=row["attempt"],
         branch=row["branch"],
         pr_number=row["pr_number"],
+        analysis_comment_id=row["analysis_comment_id"],
         started_at=_parse_dt(row["started_at"]),
         ended_at=_parse_dt(row["ended_at"]),
         error=row["error"],
@@ -220,8 +222,8 @@ class SQLiteStorage:
     async def insert_run(self, run: Run) -> None:
         await self._db.execute(
             """
-            INSERT INTO runs (id, issue_id, provider, status, attempt, branch, pr_number, started_at, ended_at, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO runs (id, issue_id, provider, status, attempt, branch, pr_number, analysis_comment_id, started_at, ended_at, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run.id,
@@ -231,6 +233,7 @@ class SQLiteStorage:
                 run.attempt,
                 run.branch,
                 run.pr_number,
+                run.analysis_comment_id,
                 run.started_at.isoformat(),
                 run.ended_at.isoformat() if run.ended_at else None,
                 run.error,
@@ -264,6 +267,22 @@ class SQLiteStorage:
         ) as cur:
             row = await cur.fetchone()
         return row[0] if row else 0
+
+    async def get_analysis_run(self, issue_id: str) -> Run | None:
+        """Return the first completed run for an issue (Phase 1 analysis)."""
+        async with self._db.execute(
+            "SELECT * FROM runs WHERE issue_id = ? AND status = 'completed' ORDER BY started_at ASC LIMIT 1",
+            (issue_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_run(row) if row else None
+
+    async def update_run_analysis_comment_id(self, run_id: str, comment_id: int) -> None:
+        await self._db.execute(
+            "UPDATE runs SET analysis_comment_id = ? WHERE id = ?",
+            (comment_id, run_id),
+        )
+        await self._db.commit()
 
     # ------------------------------------------------------------------ events
 

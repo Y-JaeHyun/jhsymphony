@@ -87,6 +87,7 @@ class Run(BaseModel):
     attempt: int = 1
     branch: str | None = None
     pr_number: int | None = None
+    analysis_comment_id: int | None = None
     started_at: datetime = Field(default_factory=_utc_now)
     ended_at: datetime | None = None
     error: str | None = None

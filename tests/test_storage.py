@@ -116,3 +116,28 @@ async def test_upsert_issue_body_preserved_on_update(storage):
     await storage.upsert_issue(issue)
     result = await storage.get_issue("gh-body2")
     assert result.body == "Original body"
+
+
+async def test_run_analysis_comment_id(storage):
+    run = Run(id="run-ac", issue_id="gh-1", provider="claude", analysis_comment_id=12345)
+    await storage.insert_run(run)
+    result = await storage.get_run("run-ac")
+    assert result is not None
+    assert result.analysis_comment_id == 12345
+
+
+async def test_get_analysis_run(storage):
+    await storage.insert_run(
+        Run(id="run-phase1", issue_id="gh-1", provider="codex", status=RunStatus.COMPLETED)
+    )
+    await storage.insert_run(
+        Run(id="run-phase2", issue_id="gh-1", provider="claude", status=RunStatus.RUNNING)
+    )
+    result = await storage.get_analysis_run("gh-1")
+    assert result is not None
+    assert result.id == "run-phase1"
+
+
+async def test_get_analysis_run_not_found(storage):
+    result = await storage.get_analysis_run("nonexistent")
+    assert result is None
