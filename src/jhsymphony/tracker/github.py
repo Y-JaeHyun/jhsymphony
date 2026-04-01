@@ -46,10 +46,26 @@ class GitHubTracker:
             ))
         return issues
 
-    async def post_comment(self, issue_number: int, body: str) -> None:
+    async def post_comment(self, issue_number: int, body: str) -> int:
         url = f"{_API_BASE}/repos/{self._repo}/issues/{issue_number}/comments"
         resp = await self._client.post(url, json={"body": body})
         resp.raise_for_status()
+        return resp.json()["id"]
+
+    async def fetch_comments(self, issue_number: int) -> list[dict]:
+        """Fetch all comments on an issue, ordered by creation time."""
+        url = f"{_API_BASE}/repos/{self._repo}/issues/{issue_number}/comments"
+        resp = await self._client.get(url, params={"per_page": 100})
+        resp.raise_for_status()
+        return [
+            {
+                "id": c["id"],
+                "author": c["user"]["login"],
+                "body": c["body"],
+                "created_at": c["created_at"],
+            }
+            for c in resp.json()
+        ]
 
     async def create_pr(self, title: str, head: str, base: str, body: str) -> dict:
         url = f"{_API_BASE}/repos/{self._repo}/pulls"
