@@ -38,8 +38,10 @@ class ClaudeProvider:
 
     def _parse_event(self, msg: dict[str, Any]) -> AgentEvent | None:
         msg_type = msg.get("type", "")
-        if msg_type in ("assistant", "message", "result"):
-            content = msg.get("content", "")
+        if msg_type in ("assistant", "message"):
+            # Claude CLI nests content: msg["message"]["content"]
+            message = msg.get("message", msg)
+            content = message.get("content", "")
             if isinstance(content, list):
                 text_parts = [
                     block.get("text", "")
@@ -50,6 +52,10 @@ class ClaudeProvider:
             else:
                 text = str(content)
             return AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": text})
+        if msg_type == "result":
+            # Claude CLI puts final text in msg["result"]
+            text = msg.get("result", "")
+            return AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": str(text) if text else ""})
         if msg_type == "tool_use":
             return AgentEvent(
                 type=EventType.TOOL_CALL,
