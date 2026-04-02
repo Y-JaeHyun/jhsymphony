@@ -334,3 +334,49 @@ Step 1, step 2.
     assert "src/foo/Bar.go" in manifest.required_files
     assert "src/foo/Baz.go" in manifest.required_files
     assert "tests/test_bar.go" in manifest.required_files
+
+
+from jhsymphony.models import ExecutionHealth
+
+
+async def test_health_check_ok(dispatcher, storage):
+    """Normal run with exit_code=0, no errors → OK."""
+    run_id = "run-health-ok"
+    await storage.insert_run(Run(id=run_id, issue_id="gh-1", provider="claude", status=RunStatus.RUNNING))
+    for i in range(15):
+        await storage.insert_event(run_id, i, "message.delta", {"text": f"chunk {i}"})
+    await storage.insert_event(run_id, 15, "completed", {"exit_code": 0, "reason": "done"})
+    health, info = await dispatcher._check_execution_health(run_id)
+    assert health == ExecutionHealth.OK
+    assert info["event_count"] == 16
+    assert info["exit_code"] == 0
+
+
+async def test_health_check_failed_exit_code(dispatcher, storage):
+    """Non-zero exit code → FAILED."""
+    run_id = "run-health-fail"
+    await storage.insert_run(Run(id=run_id, issue_id="gh-1", provider="claude", status=RunStatus.RUNNING))
+    await storage.insert_event(run_id, 0, "completed", {"exit_code": 1, "reason": "error"})
+    health, info = await dispatcher._check_execution_health(run_id)
+    assert health == ExecutionHealth.FAILED
+
+
+async def test_health_check_error_event(dispatcher, storage):
+    """Error event present → FAILED."""
+    run_id = "run-health-err"
+    await storage.insert_run(Run(id=run_id, issue_id="gh-1", provider="claude", status=RunStatus.RUNNING))
+    for i in range(20):
+        await storage.insert_event(run_id, i, "message.delta", {"text": f"chunk {i}"})
+    await storage.insert_event(run_id, 20, "error", {"error": "timeout"})
+    health, info = await dispatcher._check_execution_health(run_id)
+    assert health == ExecutionHealth.FAILED
+
+
+async def test_health_check_suspect_low_events(dispatcher, storage):
+    """Very few events with exit_code=0 → SUSPECT."""
+    run_id = "run-health-suspect"
+    await storage.insert_run(Run(id=run_id, issue_id="gh-1", provider="claude", status=RunStatus.RUNNING))
+    await storage.insert_event(run_id, 0, "session.started", {"pid": 1})
+    await storage.insert_event(run_id, 1, "completed", {"exit_code": 0, "reason": "done"})
+    health, info = await dispatcher._check_execution_health(run_id)
+    assert health == ExecutionHealth.SUSPECT

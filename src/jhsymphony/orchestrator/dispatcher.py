@@ -6,7 +6,7 @@ import re
 import uuid
 from typing import Any
 
-from jhsymphony.models import Issue, IssueState, PlanManifest, Run, RunStatus, UsageRecord
+from jhsymphony.models import ExecutionHealth, Issue, IssueState, PlanManifest, Run, RunStatus, UsageRecord
 from jhsymphony.orchestrator.lease import LeaseManager
 from jhsymphony.providers.base import EventType, RunContext
 from jhsymphony.storage.base import Storage
@@ -641,6 +641,40 @@ class Dispatcher:
             return None
 
         return PlanManifest(required_files=files, expected_file_count_min=len(files))
+
+    async def _check_execution_health(self, run_id: str) -> tuple[ExecutionHealth, dict]:
+        """Gate 1: Check if the Claude CLI execution completed healthily."""
+        events = await self._storage.list_events(run_id, since_seq=-1)
+        event_count = len(events)
+        exit_code = 0
+        has_error = False
+        budget_killed = False
+
+        for evt in events:
+            evt_type = evt.get("type") or evt.get("event_type", "")
+            payload = evt.get("payload", {})
+
+            if evt_type == "completed":
+                exit_code = payload.get("exit_code", 0)
+            elif evt_type == "error":
+                has_error = True
+
+        run_cost = await self._storage.sum_run_cost(run_id)
+        if run_cost >= self._budget_per_run_limit:
+            budget_killed = True
+
+        info = {
+            "event_count": event_count,
+            "exit_code": exit_code,
+            "has_error": has_error,
+            "budget_killed": budget_killed,
+        }
+
+        if has_error or exit_code != 0:
+            return ExecutionHealth.FAILED, info
+        if event_count < 10 or budget_killed:
+            return ExecutionHealth.SUSPECT, info
+        return ExecutionHealth.OK, info
 
     async def cancel_run(self, run_id: str) -> None:
         task = self._tasks.get(run_id)
