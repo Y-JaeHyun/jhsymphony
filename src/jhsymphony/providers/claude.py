@@ -75,15 +75,20 @@ class ClaudeProvider:
         return None
 
     @staticmethod
-    async def _drain_stderr(proc: asyncio.subprocess.Process) -> None:
-        """Read and discard stderr to prevent pipe buffer deadlock."""
+    async def _drain_stderr(proc: asyncio.subprocess.Process) -> list[str]:
+        """Read stderr to prevent pipe buffer deadlock. Returns collected lines."""
+        lines: list[str] = []
         try:
             while True:
                 chunk = await proc.stderr.read(4096)
                 if not chunk:
                     break
+                text = chunk.decode(errors="replace").strip()
+                if text:
+                    lines.append(text)
         except Exception:
             pass
+        return lines
 
     async def run_turn(self, session: dict[str, Any], prompt: str) -> AsyncIterator[AgentEvent]:
         cmd = [
@@ -126,10 +131,21 @@ class ClaudeProvider:
                     yield AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": text})
 
             await proc.wait()
-            stderr_task.cancel()
+            stderr_lines = []
+            try:
+                stderr_lines = await stderr_task
+            except asyncio.CancelledError:
+                pass
+            stderr_text = "\n".join(stderr_lines[-10:]) if stderr_lines else ""
+            if proc.returncode != 0 and stderr_text:
+                logger.warning("Claude CLI exited %d, stderr: %s", proc.returncode, stderr_text[:500])
             yield AgentEvent(
                 type=EventType.COMPLETED,
-                data={"reason": "done" if proc.returncode == 0 else "error", "exit_code": proc.returncode},
+                data={
+                    "reason": "done" if proc.returncode == 0 else "error",
+                    "exit_code": proc.returncode,
+                    "stderr": stderr_text[:1000] if stderr_text else "",
+                },
             )
         except asyncio.TimeoutError:
             if session.get("process"):

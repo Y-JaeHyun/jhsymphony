@@ -425,9 +425,14 @@ class Dispatcher:
                 if raw_admin:
                     admin_decisions_text = raw_admin
                 if decisions:
-                    decisions_summary = "\n".join(
-                        f"- DECISION-{k}: {v}" for k, v in sorted(decisions.items())
-                    )
+                    # Extract DECISION titles from analysis to provide scope context
+                    decision_titles = self._extract_decision_titles(analysis_text) if analysis_text else {}
+                    lines = []
+                    for k, v in sorted(decisions.items()):
+                        title = decision_titles.get(k, "")
+                        scope = f" ({title})" if title else ""
+                        lines.append(f"- DECISION-{k}{scope}: {v}")
+                    decisions_summary = "\n".join(lines)
 
             # Build context-rich implementation prompt
             prompt_parts = [
@@ -437,12 +442,17 @@ class Dispatcher:
             if analysis_text and analysis_text != "Analysis completed.":
                 prompt_parts.append(f"## Analysis Plan (from Phase 1)\n{analysis_text}\n")
             if decisions_summary:
-                prompt_parts.append(f"## Admin Decisions\n{decisions_summary}\n")
+                prompt_parts.append(
+                    f"## Admin Decisions\n{decisions_summary}\n\n"
+                    "IMPORTANT: Each DECISION applies ONLY to its specific scope (shown in parentheses). "
+                    "All other implementation steps MUST proceed normally regardless of any individual DECISION.\n"
+                )
             if admin_decisions_text:
                 prompt_parts.append(f"## Admin Comments (raw)\n{admin_decisions_text}\n")
             prompt_parts.append(
                 "Implement the changes following the analysis plan above.\n"
-                "Where the analysis identified DECISION points, follow the admin's chosen option.\n\n"
+                "Where the analysis identified DECISION points, follow the admin's chosen option "
+                "for that specific item only.\n\n"
                 "CRITICAL RULES:\n"
                 "- You MUST implement ALL items from the analysis plan. Partial implementation is NOT acceptable.\n"
                 "- Implement ALL Affected Files listed in the plan.\n"
@@ -485,17 +495,20 @@ class Dispatcher:
             verification = await self._verify_execution(run_id, manifest, changed_files)
 
             # Gate 3: Action decision
-            if verification.health == ExecutionHealth.FAILED:
-                logger.error("Run %s: execution health FAILED, aborting PR", run_id)
+            if verification.health == ExecutionHealth.FAILED and not has_changes:
+                # Only abort if FAILED *and* no code changes produced.
+                # If there are code changes despite exit_code!=0 (e.g. max_turns exceeded),
+                # proceed to completeness check and create a (possibly draft) PR.
+                logger.error("Run %s: execution health FAILED with no changes, aborting PR", run_id)
                 await self._tracker.post_comment(
                     issue.number,
-                    f"**JHSymphony** implementation failed (exit_code={verification.exit_code}).\n"
+                    f"**JHSymphony** implementation failed (exit_code={verification.exit_code}, no changes).\n"
                     f"*Run: `{run_id}`*",
                 )
                 await self._storage.update_run_status(run_id, RunStatus.FAILED, error="execution_health_failed")
-                await self._storage.update_issue_state(issue.id, IssueState.AWAITING_APPROVAL)
+                await self._storage.update_issue_state(issue.id, IssueState.FAILED)
                 try:
-                    await self._tracker.add_labels(issue.number, ["waiting-approval"])
+                    await self._tracker.remove_label(issue.number, "approved")
                 except Exception:
                     pass
                 return
@@ -653,6 +666,15 @@ class Dispatcher:
         )
 
     _DECISION_RE = re.compile(r"DECISION-(\d+)\s*:\s*(.+)", re.IGNORECASE)
+    _DECISION_TITLE_RE = re.compile(r"###?\s*DECISION-(\d+)\s*[:：]\s*(.+)", re.IGNORECASE)
+
+    @staticmethod
+    def _extract_decision_titles(analysis_text: str) -> dict[str, str]:
+        """Extract DECISION titles from Phase 1 analysis (e.g. '### DECISION-1: DB choice')."""
+        titles = {}
+        for m in Dispatcher._DECISION_TITLE_RE.finditer(analysis_text):
+            titles[m.group(1)] = m.group(2).strip()
+        return titles
 
     @staticmethod
     def _extract_admin_decisions(
