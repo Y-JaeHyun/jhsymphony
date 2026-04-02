@@ -44,7 +44,7 @@ class Scheduler:
                 existing = await self._storage.get_issue(candidate.id)
                 if existing:
                     if existing.state.is_active() or existing.state in (
-                        IssueState.COMPLETED, IssueState.FAILED, IssueState.CANCELLED,
+                        IssueState.COMPLETED, IssueState.PR_OPEN, IssueState.FAILED, IssueState.CANCELLED,
                     ):
                         continue
                 await self._storage.upsert_issue(candidate)
@@ -52,6 +52,9 @@ class Scheduler:
 
             # Check awaiting_approval issues for approved label
             await self._check_approvals(active_issues)
+
+            # Check PR_OPEN issues for needs-revision label
+            await self._check_revisions(active_issues)
 
         except Exception:
             logger.exception("Error in scheduler tick")
@@ -76,6 +79,26 @@ class Scheduler:
                         )
             except Exception:
                 logger.warning("Failed to check approval for issue %s", issue.id, exc_info=True)
+
+    async def _check_revisions(self, issues: list[Issue]) -> None:
+        """Poll issues in PR_OPEN state for the 'needs-revision' label."""
+        for issue in issues:
+            if issue.state != IssueState.PR_OPEN:
+                continue
+            if self._repo and issue.repo != self._repo:
+                continue
+            try:
+                has_revision_label = await self._tracker.check_label(issue.number, "needs-revision")
+                if has_revision_label:
+                    logger.info("Issue %s (#%d) needs revision!", issue.id, issue.number)
+                    run_id = await self._dispatcher.dispatch_revision(issue)
+                    if run_id is None:
+                        logger.warning(
+                            "Issue %s (#%d) needs-revision but dispatch_revision returned None",
+                            issue.id, issue.number,
+                        )
+            except Exception:
+                logger.warning("Failed to check revision for issue %s", issue.id, exc_info=True)
 
     async def run(self) -> None:
         self._running = True

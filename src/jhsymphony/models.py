@@ -19,6 +19,8 @@ class IssueState(StrEnum):
     RUNNING = "running"
     REVIEWING = "reviewing"
     COMPLETED = "completed"
+    PR_OPEN = "pr_open"
+    REVISING = "revising"
     FAILED = "failed"
     CANCELLED = "cancelled"
     RETRY_WAIT = "retry_wait"
@@ -32,6 +34,8 @@ class IssueState(StrEnum):
             IssueState.PREPARING,
             IssueState.RUNNING,
             IssueState.REVIEWING,
+            IssueState.PR_OPEN,
+            IssueState.REVISING,
             IssueState.RETRY_WAIT,
         }
 
@@ -82,6 +86,7 @@ class CompletenessLevel(StrEnum):
 class PlanManifest(BaseModel):
     required_files: list[str] = []
     optional_files: list[str] = []
+    required_changes: list[dict] = []  # [{file, symbol, step_id}]
     implementation_steps: list[dict] = []
     expected_file_count_min: int = 0
 

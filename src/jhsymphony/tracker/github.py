@@ -88,11 +88,15 @@ class GitHubTracker:
 
     async def check_approved(self, issue_number: int) -> bool:
         """Check if an issue has the 'approved' label."""
+        return await self.check_label(issue_number, "approved")
+
+    async def check_label(self, issue_number: int, label: str) -> bool:
+        """Check if an issue has a specific label."""
         url = f"{_API_BASE}/repos/{self._repo}/issues/{issue_number}/labels"
         resp = await self._client.get(url)
         resp.raise_for_status()
         labels = [l["name"] for l in resp.json()]
-        return "approved" in labels
+        return label in labels
 
     async def close_issue(self, issue_number: int) -> None:
         url = f"{_API_BASE}/repos/{self._repo}/issues/{issue_number}"

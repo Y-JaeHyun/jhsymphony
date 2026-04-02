@@ -112,6 +112,35 @@ class Dispatcher:
             await self._storage.update_issue_state(issue.id, IssueState.AWAITING_APPROVAL)
             return None
 
+    async def dispatch_revision(self, issue: Issue) -> str | None:
+        """Dispatch a revision run for an issue with needs-revision label."""
+        acquired = await self._lease_manager.try_acquire(issue.id)
+        if not acquired:
+            return None
+
+        try:
+            await self._storage.update_issue_state(issue.id, IssueState.REVISING)
+
+            run_id = str(uuid.uuid4())
+            provider = self._router.get("claude") or self._router.select(issue.labels)
+            _name_attr = getattr(provider, "name", None)
+            provider_name = _name_attr if isinstance(_name_attr, str) else type(provider).__name__
+
+            run = Run(id=run_id, issue_id=issue.id, provider=provider_name, status=RunStatus.STARTING)
+            await self._storage.insert_run(run)
+
+            task = asyncio.create_task(self._execute_revision(run_id, issue, provider))
+            self._tasks[run_id] = task
+            task.add_done_callback(lambda t: self._tasks.pop(run_id, None))
+
+            logger.info("Dispatched revision run %s for issue %s", run_id, issue.id)
+            return run_id
+        except Exception:
+            logger.exception("Failed to dispatch revision for issue %s", issue.id)
+            await self._lease_manager.release(issue.id)
+            await self._storage.update_issue_state(issue.id, IssueState.PR_OPEN)
+            return None
+
     # ── Agent execution helpers ──
 
     async def _run_agent(self, run_id: str, issue: Issue, provider: Any, prompt: str, workspace: Any) -> int:
@@ -323,9 +352,12 @@ class Dispatcher:
                 f"If CODE CHANGES are needed, also include a machine-readable manifest block:\n\n"
                 f"<!-- plan-manifest -->\n"
                 f"```json\n"
-                f'{{"required_files": ["path/to/file1", "path/to/file2"], "optional_files": [], "implementation_steps": [{{"id": 1, "name": "step description", "critical": true}}], "expected_file_count_min": N}}\n'
+                f'{{"required_files": ["path/to/file1", "path/to/file2"], "optional_files": [], "required_changes": [{{"file": "path/to/file1", "symbol": "FunctionName", "step_id": 1}}], "implementation_steps": [{{"id": 1, "name": "step description", "critical": true}}], "expected_file_count_min": N}}\n'
                 f"```\n\n"
-                f"Place this block after the Affected Files table. The `required_files` should list every file that MUST be modified for a complete implementation. The `implementation_steps` should match your Implementation Plan steps.\n\n"
+                f"Place this block after the Affected Files table.\n"
+                f"- `required_files`: every file that MUST be modified\n"
+                f"- `required_changes`: for files with multiple functions to modify, list each function/symbol separately with its step_id\n"
+                f"- `implementation_steps`: match your Implementation Plan steps\n\n"
                 f"- Do NOT modify any files\n\n"
                 f"Work in the current directory."
             )
@@ -434,6 +466,16 @@ class Dispatcher:
                         lines.append(f"- DECISION-{k}{scope}: {v}")
                     decisions_summary = "\n".join(lines)
 
+            # Extract structured feedback (SKIP/ADD/CORRECT)
+            feedback_items = self._extract_admin_feedback(admin_decisions_text) if admin_decisions_text else []
+            feedback_summary = ""
+            if feedback_items:
+                feedback_lines = []
+                for fb in feedback_items:
+                    step_ref = f" (step-{fb['step_id']})" if fb['step_id'] else ""
+                    feedback_lines.append(f"- {fb['type']}{step_ref}: {fb['detail']}")
+                feedback_summary = "\n".join(feedback_lines)
+
             # Build implementation prompt with full context
             prompt_parts = [
                 f"You are implementing GitHub issue #{issue.number}: {issue.title}\n",
@@ -446,6 +488,11 @@ class Dispatcher:
                     f"## Admin Decisions\n{decisions_summary}\n\n"
                     "IMPORTANT: Each DECISION applies ONLY to its specific scope (shown in parentheses). "
                     "All other implementation steps MUST proceed normally regardless of any individual DECISION.\n"
+                )
+            if feedback_summary:
+                prompt_parts.append(
+                    f"## Admin Feedback (MUST be applied)\n{feedback_summary}\n\n"
+                    "Apply ALL feedback above: SKIP marked steps, include ADD items, fix CORRECT items.\n"
                 )
             if admin_decisions_text:
                 prompt_parts.append(f"## Admin Comments (raw)\n{admin_decisions_text}\n")
@@ -506,13 +553,19 @@ class Dispatcher:
                 # Commit any uncommitted changes
                 has_changes = await self._has_code_changes(ws_path, default_branch, issue)
 
-                # Verify execution
+                # Verify execution (file-level + symbol-level)
                 diff_result = await run_subprocess(
                     ["git", "diff", "--name-only", f"origin/{default_branch}...HEAD"],
                     cwd=ws_path, env=None, timeout_sec=10,
                 )
                 changed_files = [f for f in diff_result.stdout.strip().split("\n") if f]
-                verification = await self._verify_execution(run_id, manifest, changed_files)
+                diff_content_result = await run_subprocess(
+                    ["git", "diff", f"origin/{default_branch}...HEAD"],
+                    cwd=ws_path, env=None, timeout_sec=30,
+                )
+                verification = await self._verify_execution(
+                    run_id, manifest, changed_files, diff_content_result.stdout,
+                )
 
                 # CHECKPOINT + no changes → agent spent all turns reading, continue
                 if not has_changes and verification.health == ExecutionHealth.CHECKPOINT:
@@ -609,6 +662,108 @@ class Dispatcher:
         finally:
             await self._lease_manager.release(issue.id)
 
+    async def _execute_revision(self, run_id: str, issue: Issue, provider: Any) -> None:
+        """Revision run: apply admin feedback on existing PR branch."""
+        try:
+            await self._storage.update_run_status(run_id, RunStatus.RUNNING)
+
+            workspace = await self._workspace_manager.create(issue.id)
+
+            try:
+                await self._tracker.post_comment(
+                    issue.number,
+                    f"**JHSymphony** is revising the implementation... (run `{run_id}`)",
+                )
+                await self._tracker.remove_label(issue.number, "needs-revision")
+            except Exception:
+                pass
+
+            # Collect Phase 1 analysis
+            analysis_text = ""
+            analysis_run = await self._storage.get_analysis_run(issue.id)
+            if analysis_run:
+                analysis_text = await self._collect_agent_response(analysis_run.id)
+
+            # Collect ALL admin comments (including post-PR feedback)
+            revision_feedback = ""
+            if self._bot_login:
+                comments = await self._tracker.fetch_comments(issue.number)
+                # Find comments after the last bot "created a PR" comment
+                pr_comment_idx = -1
+                for i, c in enumerate(comments):
+                    if c["author"] == self._bot_login and "created a PR" in c["body"]:
+                        pr_comment_idx = i
+                admin_feedback = []
+                if pr_comment_idx >= 0:
+                    for c in comments[pr_comment_idx + 1:]:
+                        if c["author"] != self._bot_login:
+                            admin_feedback.append(c["body"])
+                revision_feedback = "\n\n".join(admin_feedback)
+
+            ws_path = str(workspace.path)
+            default_branch = await self._detect_default_branch(ws_path)
+
+            # Get current diff stat
+            diff_stat_result = await run_subprocess(
+                ["git", "diff", "--stat", f"origin/{default_branch}...HEAD"],
+                cwd=ws_path, env=None, timeout_sec=10,
+            )
+
+            # Build revision prompt
+            prompt_parts = [
+                f"You are revising the implementation for GitHub issue #{issue.number}: {issue.title}\n",
+                f"## Original Issue\n{issue.body}\n",
+            ]
+            if analysis_text and analysis_text != "Analysis completed.":
+                prompt_parts.append(f"## Analysis Plan\n{analysis_text}\n")
+            prompt_parts.append(
+                f"## Current Implementation (already on this branch)\n"
+                f"```\n{diff_stat_result.stdout.strip()}\n```\n\n"
+            )
+            if revision_feedback:
+                prompt_parts.append(
+                    f"## Revision Requested\n"
+                    f"The following feedback was provided after PR review. You MUST address ALL items:\n\n"
+                    f"{revision_feedback}\n\n"
+                )
+            prompt_parts.append(
+                "Implement the requested changes. The existing code on this branch is your starting point.\n"
+                "Read ONLY the files mentioned in the feedback, then make the changes.\n"
+                "Commit after each logical unit of work.\n"
+                "Do not ask questions — just implement."
+            )
+            prompt = "\n".join(prompt_parts)
+
+            await self._run_agent(run_id, issue, provider, prompt, workspace)
+
+            await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
+            has_changes = await self._has_code_changes(ws_path, default_branch, issue)
+
+            if has_changes:
+                await self._tracker.push_branch(ws_path, workspace.branch)
+                await self._tracker.post_comment(
+                    issue.number,
+                    f"**JHSymphony** revised the PR based on feedback.\n*Run: `{run_id}`*",
+                )
+            else:
+                await self._tracker.post_comment(
+                    issue.number,
+                    f"**JHSymphony** processed the revision but no additional changes were made.\n*Run: `{run_id}`*",
+                )
+
+            await self._storage.update_issue_state(issue.id, IssueState.PR_OPEN)
+
+        except asyncio.CancelledError:
+            await self._storage.update_run_status(run_id, RunStatus.CANCELLED)
+            await self._storage.update_issue_state(issue.id, IssueState.PR_OPEN)
+            raise
+        except Exception as exc:
+            logger.exception("Revision run %s failed: %s", run_id, exc)
+            await self._storage.update_run_status(run_id, RunStatus.FAILED, error=str(exc))
+            await self._storage.update_issue_state(issue.id, IssueState.PR_OPEN)
+        finally:
+            await self._lease_manager.release(issue.id)
+
     async def _read_docs_files(self, ws_path: str) -> str:
         """Read any docs/ files created by the agent for inclusion in PR body."""
         import os
@@ -672,8 +827,8 @@ class Dispatcher:
                 await self._tracker.add_labels(issue.number, ["needs-followup"])
             except Exception:
                 pass
-        await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
-        logger.info("Created %sPR for issue #%d", "draft " if draft else "", issue.number)
+        await self._storage.update_issue_state(issue.id, IssueState.PR_OPEN)
+        logger.info("Created %sPR for issue #%d (state=PR_OPEN)", "draft " if draft else "", issue.number)
 
     @staticmethod
     def _is_question_issue(issue: Issue) -> bool:
@@ -714,6 +869,10 @@ class Dispatcher:
 
     _DECISION_RE = re.compile(r"DECISION-(\d+)\s*:\s*(.+)", re.IGNORECASE)
     _DECISION_TITLE_RE = re.compile(r"###?\s*DECISION-(\d+)\s*[:：]\s*(.+)", re.IGNORECASE)
+    _FEEDBACK_RE = re.compile(
+        r"^(SKIP|ADD|CORRECT)\s*(?:step-?(\d+))?\s*[:：]\s*(.+)",
+        re.IGNORECASE | re.MULTILINE,
+    )
 
     @staticmethod
     def _extract_decision_titles(analysis_text: str) -> dict[str, str]:
@@ -722,6 +881,19 @@ class Dispatcher:
         for m in Dispatcher._DECISION_TITLE_RE.finditer(analysis_text):
             titles[m.group(1)] = m.group(2).strip()
         return titles
+
+    @staticmethod
+    def _extract_admin_feedback(raw_text: str) -> list[dict]:
+        """Extract structured feedback (SKIP/ADD/CORRECT) from admin comments."""
+        feedback = []
+        for m in Dispatcher._FEEDBACK_RE.finditer(raw_text):
+            entry = {
+                "type": m.group(1).upper(),
+                "step_id": m.group(2) or "",
+                "detail": m.group(3).strip(),
+            }
+            feedback.append(entry)
+        return feedback
 
     @staticmethod
     def _extract_admin_decisions(
@@ -862,9 +1034,9 @@ class Dispatcher:
 
     @staticmethod
     def _check_completeness(
-        manifest: PlanManifest | None, changed_files: list[str]
+        manifest: PlanManifest | None, changed_files: list[str], diff_content: str = "",
     ) -> tuple[CompletenessLevel, float, list[str]]:
-        """Gate 2: Compare plan manifest against actually changed files."""
+        """Gate 2: Compare plan manifest against actually changed files and symbols."""
         import os
 
         if manifest is None or not manifest.required_files:
@@ -873,17 +1045,37 @@ class Dispatcher:
         changed_basenames = {os.path.basename(f) for f in changed_files}
         changed_full = set(changed_files)
 
-        covered = []
-        missing = []
+        # File-level check
+        file_covered = []
+        file_missing = []
         for req in manifest.required_files:
             req_basename = os.path.basename(req)
             if req in changed_full or req_basename in changed_basenames:
-                covered.append(req)
+                file_covered.append(req)
             else:
-                missing.append(req)
+                file_missing.append(req)
 
-        total = len(manifest.required_files)
-        ratio = len(covered) / total
+        total_files = len(manifest.required_files)
+        file_ratio = len(file_covered) / total_files
+
+        # Symbol-level check (if required_changes provided and diff available)
+        symbol_ratio = 1.0
+        symbol_missing = []
+        if manifest.required_changes and diff_content:
+            symbol_covered = 0
+            for change in manifest.required_changes:
+                symbol = change.get("symbol", "")
+                if symbol and symbol in diff_content:
+                    symbol_covered += 1
+                elif symbol:
+                    symbol_missing.append(f"{change.get('file', '')}:{symbol}")
+            total_symbols = len(manifest.required_changes)
+            if total_symbols > 0:
+                symbol_ratio = symbol_covered / total_symbols
+
+        # Final ratio = minimum of file and symbol coverage
+        ratio = min(file_ratio, symbol_ratio)
+        missing = file_missing + symbol_missing
 
         if ratio >= 0.8:
             level = CompletenessLevel.COMPLETE
@@ -895,11 +1087,12 @@ class Dispatcher:
         return level, ratio, missing
 
     async def _verify_execution(
-        self, run_id: str, manifest: PlanManifest | None, changed_files: list[str]
+        self, run_id: str, manifest: PlanManifest | None, changed_files: list[str],
+        diff_content: str = "",
     ) -> VerificationResult:
         """Run Gate 1 (health) and Gate 2 (completeness), return combined result."""
         health, info = await self._check_execution_health(run_id)
-        completeness, ratio, missing = self._check_completeness(manifest, changed_files)
+        completeness, ratio, missing = self._check_completeness(manifest, changed_files, diff_content)
 
         return VerificationResult(
             health=health,
