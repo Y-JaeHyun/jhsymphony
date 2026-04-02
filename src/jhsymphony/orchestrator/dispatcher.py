@@ -320,6 +320,12 @@ class Dispatcher:
                 f"> - **B)** <option B description>\n\n"
                 f"Repeat for each decision point (DECISION-2, DECISION-3, etc.).\n"
                 f"Use **bold** for each DECISION title to make them stand out.\n\n"
+                f"If CODE CHANGES are needed, also include a machine-readable manifest block:\n\n"
+                f"<!-- plan-manifest -->\n"
+                f"```json\n"
+                f'{{"required_files": ["path/to/file1", "path/to/file2"], "optional_files": [], "implementation_steps": [{{"id": 1, "name": "step description", "critical": true}}], "expected_file_count_min": N}}\n'
+                f"```\n\n"
+                f"Place this block after the Affected Files table. The `required_files` should list every file that MUST be modified for a complete implementation. The `implementation_steps` should match your Implementation Plan steps.\n\n"
                 f"- Do NOT modify any files\n\n"
                 f"Work in the current directory."
             )
