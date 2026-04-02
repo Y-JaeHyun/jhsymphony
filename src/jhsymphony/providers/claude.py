@@ -31,7 +31,7 @@ class ClaudeProvider:
             "issue_title": ctx.issue_title,
             "issue_body": ctx.issue_body,
             "env": ctx.env,
-            "max_turns": min(ctx.max_turns, self._max_turns),
+            "max_turns": self._max_turns,
             "timeout_sec": ctx.timeout_sec,
             "process": None,
         }
