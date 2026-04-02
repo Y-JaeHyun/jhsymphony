@@ -493,10 +493,20 @@ class Dispatcher:
                     f"*Run: `{run_id}`*",
                 )
                 await self._storage.update_run_status(run_id, RunStatus.FAILED, error="execution_health_failed")
-                await self._storage.update_issue_state(issue.id, IssueState.FAILED)
+                await self._storage.update_issue_state(issue.id, IssueState.AWAITING_APPROVAL)
+                try:
+                    await self._tracker.add_labels(issue.number, ["waiting-approval"])
+                except Exception:
+                    pass
                 return
 
-            if verification.completeness == CompletenessLevel.INCOMPLETE:
+            # Attempt remediation if INCOMPLETE, or SUSPECT + PARTIAL
+            should_remediate = (
+                verification.completeness == CompletenessLevel.INCOMPLETE
+                or (verification.health == ExecutionHealth.SUSPECT
+                    and verification.completeness == CompletenessLevel.PARTIAL)
+            )
+            if should_remediate and manifest is not None:
                 logger.info("Run %s: INCOMPLETE (%.0f%%), attempting remediation", run_id, verification.coverage_ratio * 100)
                 diff_stat_result = await run_subprocess(
                     ["git", "diff", "--stat", f"origin/{default_branch}...HEAD"],
