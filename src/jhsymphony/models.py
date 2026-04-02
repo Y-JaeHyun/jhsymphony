@@ -13,11 +13,12 @@ def _utc_now() -> datetime:
 class IssueState(StrEnum):
     PENDING = "pending"
     ANALYZING = "analyzing"
-    AWAITING_APPROVAL = "awaiting_approval"
-    LEASED = "leased"
-    PREPARING = "preparing"
-    RUNNING = "running"
-    REVIEWING = "reviewing"
+    IMPLEMENTING = "implementing"
+    AWAITING_APPROVAL = "awaiting_approval"  # legacy
+    LEASED = "leased"  # legacy
+    PREPARING = "preparing"  # legacy
+    RUNNING = "running"  # legacy
+    REVIEWING = "reviewing"  # legacy
     COMPLETED = "completed"
     PR_OPEN = "pr_open"
     REVISING = "revising"
@@ -29,6 +30,7 @@ class IssueState(StrEnum):
         return self in {
             IssueState.PENDING,
             IssueState.ANALYZING,
+            IssueState.IMPLEMENTING,
             IssueState.AWAITING_APPROVAL,
             IssueState.LEASED,
             IssueState.PREPARING,

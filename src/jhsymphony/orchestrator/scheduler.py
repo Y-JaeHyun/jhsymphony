@@ -50,11 +50,11 @@ class Scheduler:
                 await self._storage.upsert_issue(candidate)
                 await self._dispatcher.dispatch(candidate)
 
-            # Check awaiting_approval issues for approved label
-            await self._check_approvals(active_issues)
-
             # Check PR_OPEN issues for needs-revision label
             await self._check_revisions(active_issues)
+
+            # Legacy: check awaiting_approval issues (for pre-existing issues)
+            await self._check_approvals(active_issues)
 
         except Exception:
             logger.exception("Error in scheduler tick")

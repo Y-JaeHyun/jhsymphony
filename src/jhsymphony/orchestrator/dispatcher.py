@@ -270,7 +270,7 @@ class Dispatcher:
     # ── Main execution flow ──
 
     async def _execute_run(self, run_id: str, issue: Issue, provider: Any) -> None:
-        """Phase 1: Analyze issue → question response or development plan."""
+        """Analyze and implement issue. Questions get answered; dev issues get PR'd."""
         try:
             is_question = self._is_question_issue(issue)
 
@@ -294,119 +294,45 @@ class Dispatcher:
                     logger.info("Answered issue #%d from Q&A cache (hit)", issue.number)
                     return
 
-            await self._storage.update_issue_state(issue.id, IssueState.ANALYZING)
             await self._storage.update_run_status(run_id, RunStatus.RUNNING)
-
             workspace = await self._workspace_manager.create(issue.id)
 
-            try:
-                await self._tracker.post_comment(
-                    issue.number,
-                    f"**JHSymphony** is analyzing this issue... (run `{run_id}`)",
-                )
-            except Exception:
-                pass
-
-            # Analysis prompt — determines issue type and responds accordingly
-            prompt = (
-                f"You are analyzing GitHub issue #{issue.number}: {issue.title}\n\n"
-                f"{issue.body}\n\n"
-                f"Determine if this issue requires CODE CHANGES or is a QUESTION/ANALYSIS request.\n\n"
-                f"IMPORTANT: Your response will be posted as a GitHub issue comment.\n"
-                f"Format your response in clean, readable GitHub-flavored Markdown:\n"
-                f"- Use ## headers to separate major sections\n"
-                f"- Use ### for subsections\n"
-                f"- Use bullet points (- or *) for lists\n"
-                f"- Use `backticks` for file names, function names, variable names, error codes\n"
-                f"- Use ```language code blocks for code snippets\n"
-                f"- Use > blockquotes for key findings or conclusions\n"
-                f"- Use **bold** for emphasis on critical points\n"
-                f"- Keep paragraphs short (2-3 sentences max)\n"
-                f"- Add blank lines between sections for readability\n\n"
-                f"If this is a QUESTION or ANALYSIS request (no code changes needed):\n"
-                f"Structure your response as:\n"
-                f"## Summary (1-2 sentence overview)\n"
-                f"## Analysis (detailed findings with code references)\n"
-                f"## Root Cause (if applicable)\n"
-                f"## Recommendation (actionable next steps)\n"
-                f"- Do NOT modify any files\n\n"
-                f"If CODE CHANGES are needed:\n"
-                f"- Do NOT implement the changes yet\n"
-                f"Structure your response as:\n"
-                f"## Summary (what needs to change and why)\n"
-                f"## Affected Files\n"
-                f"| File | Change Type | Description |\n"
-                f"|------|------------|-------------|\n"
-                f"## Implementation Plan (step by step)\n"
-                f"## Testing Strategy\n"
-                f"## Risks & Considerations\n"
-                f"If there are items that require admin decisions before implementation,\n"
-                f"list them in a dedicated section using this exact format:\n\n"
-                f"## Decisions Required\n\n"
-                f"### DECISION-1: <short title>\n"
-                f"> <context explaining why this decision is needed>\n"
-                f"> - **A)** <option A description>\n"
-                f"> - **B)** <option B description>\n\n"
-                f"Repeat for each decision point (DECISION-2, DECISION-3, etc.).\n"
-                f"Use **bold** for each DECISION title to make them stand out.\n\n"
-                f"If CODE CHANGES are needed, also include a machine-readable manifest block:\n\n"
-                f"<!-- plan-manifest -->\n"
-                f"```json\n"
-                f'{{"required_files": ["path/to/file1", "path/to/file2"], "optional_files": [], "required_changes": [{{"file": "path/to/file1", "symbol": "FunctionName", "step_id": 1}}], "implementation_steps": [{{"id": 1, "name": "step description", "critical": true}}], "expected_file_count_min": N}}\n'
-                f"```\n\n"
-                f"Place this block after the Affected Files table.\n"
-                f"- `required_files`: every file that MUST be modified\n"
-                f"- `required_changes`: for files with multiple functions to modify, list each function/symbol separately with its step_id\n"
-                f"- `implementation_steps`: match your Implementation Plan steps\n\n"
-                f"- Do NOT modify any files\n\n"
-                f"Work in the current directory."
-            )
-
-            await self._run_agent(run_id, issue, provider, prompt, workspace)
-
-            await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
-            agent_response = await self._collect_agent_response(run_id)
-            ws_path = str(workspace.path)
-            default_branch = await self._detect_default_branch(ws_path)
-            has_changes = await self._has_code_changes(ws_path, default_branch, issue)
-
-            if has_changes:
-                # Agent made code changes despite instructions — treat as question that got code changes
-                # Push and create PR anyway
-                await self._do_pr_flow(issue, run_id, workspace, default_branch)
-            else:
-                # Check if this looks like a development request (needs approval)
-                is_question = self._is_question_issue(issue)
-                if is_question:
-                    # Question flow: post answer → cache → close
+            if is_question:
+                # ── Question flow: analyze and answer ──
+                await self._storage.update_issue_state(issue.id, IssueState.ANALYZING)
+                try:
                     await self._tracker.post_comment(
                         issue.number,
-                        f"{agent_response}\n\n---\n<sub>Analyzed by JHSymphony | Run: `{run_id}`</sub>",
+                        f"**JHSymphony** is analyzing this issue... (run `{run_id}`)",
                     )
-                    # Cache the Q&A for future use
-                    try:
-                        await self._storage.insert_qa_cache(
-                            repo=issue.repo,
-                            question=f"{issue.title}\n{issue.body}",
-                            answer=agent_response,
-                            subject=issue.title,
-                            issue_number=issue.number,
-                        )
-                        logger.info("Cached Q&A for issue #%d", issue.number)
-                    except Exception:
-                        logger.debug("Failed to cache Q&A", exc_info=True)
-                    await self._tracker.close_issue(issue.number)
-                    await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
-                    logger.info("Posted analysis and closed question issue #%d", issue.number)
-                else:
-                    # Development request: post plan → await approval
-                    footer = self._build_plan_footer(agent_response)
-                    comment_body = f"{agent_response}{footer}\n\n<sub>Analyzed by JHSymphony | Run: `{run_id}`</sub>"
-                    comment_id = await self._tracker.post_comment(issue.number, comment_body)
-                    await self._storage.update_run_analysis_comment_id(run_id, comment_id)
-                    await self._tracker.add_labels(issue.number, ["waiting-approval"])
-                    await self._storage.update_issue_state(issue.id, IssueState.AWAITING_APPROVAL)
-                    logger.info("Posted dev plan for issue #%d, awaiting approval", issue.number)
+                except Exception:
+                    pass
+
+                prompt = self._build_question_prompt(issue)
+                await self._run_agent(run_id, issue, provider, prompt, workspace)
+
+                await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
+                agent_response = await self._collect_agent_response(run_id)
+                await self._tracker.post_comment(
+                    issue.number,
+                    f"{agent_response}\n\n---\n<sub>Analyzed by JHSymphony | Run: `{run_id}`</sub>",
+                )
+                try:
+                    await self._storage.insert_qa_cache(
+                        repo=issue.repo,
+                        question=f"{issue.title}\n{issue.body}",
+                        answer=agent_response,
+                        subject=issue.title,
+                        issue_number=issue.number,
+                    )
+                except Exception:
+                    logger.debug("Failed to cache Q&A", exc_info=True)
+                await self._tracker.close_issue(issue.number)
+                await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
+                logger.info("Posted analysis and closed question issue #%d", issue.number)
+            else:
+                # ── Development flow: analyze + implement in one shot ──
+                await self._execute_development(run_id, issue, provider, workspace)
 
         except asyncio.CancelledError:
             logger.info("Run %s was cancelled for issue %s", run_id, issue.id)
@@ -420,8 +346,151 @@ class Dispatcher:
         finally:
             await self._lease_manager.release(issue.id)
 
+    async def _execute_development(self, run_id: str, issue: Issue, provider: Any, workspace: Any) -> None:
+        """Analyze + implement in one shot. Self-decide where needed, document decisions."""
+        await self._storage.update_issue_state(issue.id, IssueState.IMPLEMENTING)
+
+        try:
+            await self._tracker.post_comment(
+                issue.number,
+                f"**JHSymphony** is analyzing and implementing... (run `{run_id}`)",
+            )
+        except Exception:
+            pass
+
+        # Build combined analysis+implementation prompt
+        prompt = self._build_dev_prompt(issue)
+
+        ws_path = str(workspace.path)
+        default_branch = await self._detect_default_branch(ws_path)
+
+        # ── Continuation Loop (reused from _execute_implementation) ──
+        max_continuations = 2
+        verification = None
+        prev_coverage = -1.0
+        has_changes = False
+
+        for iteration in range(1 + max_continuations):
+            run_cost = await self._storage.sum_run_cost(run_id)
+            if run_cost >= self._budget_per_run_limit * 0.8 and iteration > 0:
+                logger.warning("Run %s: budget %.0f%% used, stopping", run_id, run_cost / self._budget_per_run_limit * 100)
+                break
+
+            if iteration == 0:
+                await self._run_agent(run_id, issue, provider, prompt, workspace)
+            elif verification is not None and not has_changes:
+                await self._run_continuation_no_changes(run_id, issue, provider, workspace, None, "")
+            else:
+                diff_stat_result = await run_subprocess(
+                    ["git", "diff", "--stat", f"origin/{default_branch}...HEAD"],
+                    cwd=ws_path, env=None, timeout_sec=10,
+                )
+                # Collect agent response to parse manifest for remediation
+                agent_response = await self._collect_agent_response(run_id)
+                manifest = self._parse_plan_manifest(agent_response)
+                missing = verification.missing_files if verification else []
+                await self._run_remediation(
+                    run_id, issue, provider, workspace, manifest,
+                    missing, diff_stat_result.stdout.strip(),
+                )
+
+            has_changes = await self._has_code_changes(ws_path, default_branch, issue)
+
+            # Parse manifest from agent output for verification
+            agent_response = await self._collect_agent_response(run_id)
+            manifest = self._parse_plan_manifest(agent_response)
+
+            diff_result = await run_subprocess(
+                ["git", "diff", "--name-only", f"origin/{default_branch}...HEAD"],
+                cwd=ws_path, env=None, timeout_sec=10,
+            )
+            changed_files = [f for f in diff_result.stdout.strip().split("\n") if f]
+            diff_content_result = await run_subprocess(
+                ["git", "diff", f"origin/{default_branch}...HEAD"],
+                cwd=ws_path, env=None, timeout_sec=30,
+            )
+            verification = await self._verify_execution(
+                run_id, manifest, changed_files, diff_content_result.stdout,
+            )
+
+            # CHECKPOINT + no changes → continue
+            if not has_changes and verification.health == ExecutionHealth.CHECKPOINT:
+                if iteration < max_continuations:
+                    logger.info("Run %s: CHECKPOINT no changes (iter %d), continuing", run_id, iteration)
+                    continue
+                await self._storage.update_run_status(run_id, RunStatus.FAILED, error="no_changes_after_continuations")
+                await self._tracker.post_comment(
+                    issue.number,
+                    f"**JHSymphony** could not produce code changes after {iteration + 1} attempts.\n*Run: `{run_id}`*",
+                )
+                await self._storage.update_issue_state(issue.id, IssueState.FAILED)
+                return
+
+            if not has_changes:
+                await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
+                await self._tracker.post_comment(
+                    issue.number,
+                    f"**JHSymphony** completed but no code changes were detected.\n*Run: `{run_id}`*",
+                )
+                await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
+                return
+
+            if verification.health == ExecutionHealth.FAILED and not has_changes:
+                await self._storage.update_run_status(run_id, RunStatus.FAILED, error="execution_failed")
+                await self._tracker.post_comment(
+                    issue.number,
+                    f"**JHSymphony** implementation failed (exit_code={verification.exit_code}).\n*Run: `{run_id}`*",
+                )
+                await self._storage.update_issue_state(issue.id, IssueState.FAILED)
+                return
+
+            if verification.completeness == CompletenessLevel.COMPLETE:
+                break
+
+            if verification.health in (ExecutionHealth.CHECKPOINT, ExecutionHealth.OK, ExecutionHealth.SUSPECT):
+                current_coverage = verification.coverage_ratio
+                if iteration > 0 and current_coverage <= prev_coverage:
+                    break
+                if manifest is None:
+                    break
+                prev_coverage = current_coverage
+                if iteration < max_continuations:
+                    logger.info("Run %s: iter %d — coverage %.0f%%, continuing", run_id, iteration, current_coverage * 100)
+                continue
+
+            break
+
+        # ── Post-loop: Create PR + post self-decisions ──
+        await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
+
+        # Extract self-decisions from agent output
+        self_decisions = self._extract_self_decisions(agent_response)
+
+        # Determine draft: if there are self-decisions or incomplete
+        use_draft = bool(self_decisions) or (
+            verification is not None and verification.completeness in (
+                CompletenessLevel.INCOMPLETE, CompletenessLevel.PARTIAL,
+            )
+        )
+        report = self._build_verification_report(verification) if verification else ""
+        await self._do_pr_flow(
+            issue, run_id, workspace, default_branch, agent_response,
+            verification_report=report, draft=use_draft,
+        )
+
+        # Post self-decisions summary to issue
+        if self_decisions:
+            decisions_comment = (
+                "## Self-Decisions (관리자 검토 필요)\n"
+                "아래 항목들은 구현 과정에서 자체 판단한 사항입니다.\n"
+                "변경이 필요하면 댓글로 남기고 `needs-revision` 라벨을 추가해주세요.\n\n"
+                + "\n".join(f"{i+1}. {d}" for i, d in enumerate(self_decisions))
+                + f"\n\n<sub>Run: `{run_id}`</sub>"
+            )
+            await self._tracker.post_comment(issue.number, decisions_comment)
+
     async def _execute_implementation(self, run_id: str, issue: Issue, provider: Any) -> None:
-        """Phase 2: Actually implement code changes (after admin approval)."""
+        """Phase 2: Actually implement code changes (after admin approval). LEGACY — kept for existing approved issues."""
         try:
             await self._storage.update_issue_state(issue.id, IssueState.PREPARING)
             await self._storage.update_run_status(run_id, RunStatus.RUNNING)
@@ -841,6 +910,58 @@ class Dispatcher:
                 return True
         score = sum(1 for s in question_signals if s in text)
         return score >= 2
+
+    @staticmethod
+    def _build_question_prompt(issue: Issue) -> str:
+        """Build prompt for question/analysis issues."""
+        return (
+            f"You are analyzing GitHub issue #{issue.number}: {issue.title}\n\n"
+            f"{issue.body}\n\n"
+            "This is a QUESTION or ANALYSIS request. No code changes needed.\n"
+            "Structure your response as:\n"
+            "## Summary\n## Analysis\n## Root Cause (if applicable)\n## Recommendation\n"
+            "Do NOT modify any files.\n"
+            "Work in the current directory."
+        )
+
+    @staticmethod
+    def _build_dev_prompt(issue: Issue) -> str:
+        """Build combined analysis+implementation prompt for development issues."""
+        return (
+            f"You are analyzing AND implementing GitHub issue #{issue.number}: {issue.title}\n\n"
+            f"## Issue\n{issue.body}\n\n"
+            "## Instructions\n"
+            "1. Analyze the codebase to understand what needs to change\n"
+            "2. Where you identify decision points (multiple valid approaches), "
+            "choose the best option and document your choice\n"
+            "3. Implement ALL changes immediately\n"
+            "4. Commit after each logical unit of work\n\n"
+            "## Self-Decisions Documentation\n"
+            "For each decision you made during implementation, include a section at the END of your work:\n\n"
+            "<!-- self-decisions -->\n"
+            "- SELF-DECISION: <title> — Chose <option> because <reasoning>. Alternative was <other option>.\n"
+            "<!-- /self-decisions -->\n\n"
+            "Examples of decisions: field naming conventions, data collection methods, "
+            "breaking change handling, file structure choices.\n\n"
+            "## Critical Rules\n"
+            "- Implement ALL items required by the issue. Partial implementation is NOT acceptable.\n"
+            "- Read ONLY files you will directly edit. Do NOT explore unrelated code.\n"
+            "- Start making code changes IMMEDIATELY after reading each target file.\n"
+            "- Commit after each logical unit of work.\n\n"
+            "Work in the current directory. Do not ask questions — just implement."
+        )
+
+    _SELF_DECISION_RE = re.compile(
+        r"SELF-DECISION:\s*(.+?)(?:\n|$)", re.IGNORECASE
+    )
+
+    @staticmethod
+    def _extract_self_decisions(agent_response: str) -> list[str]:
+        """Extract self-decision entries from agent output."""
+        decisions = []
+        for m in Dispatcher._SELF_DECISION_RE.finditer(agent_response):
+            decisions.append(m.group(1).strip())
+        return decisions
 
     _DECISION_PATTERN = re.compile(r"DECISION-\d+", re.IGNORECASE)
 
