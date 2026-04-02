@@ -480,16 +480,21 @@ class Dispatcher:
             verification_report=report, draft=use_draft,
         )
 
-        # Post self-decisions summary to issue
-        if self_decisions:
-            decisions_comment = (
-                "## Self-Decisions (관리자 검토 필요)\n"
-                "아래 항목들은 구현 과정에서 자체 판단한 사항입니다.\n"
-                "변경이 필요하면 댓글로 남기고 `needs-revision` 라벨을 추가해주세요.\n\n"
-                + "\n".join(f"{i+1}. {d}" for i, d in enumerate(self_decisions))
-                + f"\n\n<sub>Run: `{run_id}`</sub>"
-            )
-            await self._tracker.post_comment(issue.number, decisions_comment)
+        # Post self-decisions + reviewer attention to issue
+        reviewer_attention = self._extract_section_from_docs(ws_path, "Reviewer Attention")
+        if self_decisions or reviewer_attention:
+            parts = []
+            if self_decisions:
+                parts.append(
+                    "## Self-Decisions (관리자 검토 필요)\n"
+                    "아래 항목들은 구현 과정에서 자체 판단한 사항입니다.\n"
+                    "변경이 필요하면 댓글로 남기고 `needs-revision` 라벨을 추가해주세요.\n\n"
+                    + "\n".join(f"{i+1}. {d}" for i, d in enumerate(self_decisions))
+                )
+            if reviewer_attention:
+                parts.append(f"## Reviewer Attention\n{reviewer_attention}")
+            parts.append(f"<sub>Run: `{run_id}`</sub>")
+            await self._tracker.post_comment(issue.number, "\n\n".join(parts))
 
     async def _execute_implementation(self, run_id: str, issue: Issue, provider: Any) -> None:
         """Phase 2: Actually implement code changes (after admin approval). LEGACY — kept for existing approved issues."""
@@ -571,17 +576,14 @@ class Dispatcher:
                 "Implement the changes following the analysis plan above.\n"
                 "Where the analysis identified DECISION points, follow the admin's chosen option "
                 "for that specific item only.\n\n"
-                "CRITICAL RULES:\n"
-                "- You MUST implement ALL items from the analysis plan. Partial implementation is NOT acceptable.\n"
-                "- Implement ALL Affected Files listed in the plan.\n"
-                "- Implement ALL steps from the Implementation Plan section.\n"
+                "RULES:\n"
+                "- Correctness over speed. Read related files as needed to understand context.\n"
+                "- Implement ALL Affected Files and steps from the analysis plan.\n"
                 "- Do NOT create planning documents or docs/ files. Go straight to code implementation.\n"
-                "- The analysis plan already tells you exactly which files to modify and how.\n"
-                "- Read ONLY the specific file you are about to edit, right before editing it.\n"
-                "- Do NOT explore directories or read unrelated files.\n"
-                "- Start making code changes IMMEDIATELY. Do not spend turns on exploration.\n"
-                "- Commit after each logical unit of work (do not wait until the end).\n\n"
-                "Work in the current directory. Do not ask questions — just implement."
+                "- If a requirement is unclear, implement the safe subset and document what remains.\n"
+                "- Run tests for changed areas when feasible.\n"
+                "- Make a single final commit after all changes are complete.\n\n"
+                "Work in the current directory. Do not ask questions — document decisions instead."
             )
             prompt = "\n".join(prompt_parts)
 
@@ -799,9 +801,10 @@ class Dispatcher:
                 )
             prompt_parts.append(
                 "Implement the requested changes. The existing code on this branch is your starting point.\n"
-                "Read ONLY the files mentioned in the feedback, then make the changes.\n"
-                "Commit after each logical unit of work.\n"
-                "Do not ask questions — just implement."
+                "Read related files as needed to understand context before making changes.\n"
+                "Correctness over speed — verify your changes work before finishing.\n"
+                "Make a single final commit after all changes are complete.\n"
+                "Do not ask questions — document any decisions in commit message."
             )
             prompt = "\n".join(prompt_parts)
 
@@ -939,18 +942,35 @@ class Dispatcher:
     def _build_dev_prompt(issue: Issue) -> str:
         """Build combined analysis+implementation prompt for development issues."""
         return (
-            f"You are analyzing AND implementing GitHub issue #{issue.number}: {issue.title}\n\n"
+            f"You are implementing GitHub issue #{issue.number}: {issue.title}\n\n"
             f"## Issue\n{issue.body}\n\n"
-            "## Instructions\n"
-            "1. Analyze the codebase to understand what needs to change\n"
-            "2. Where you identify decision points (multiple valid approaches), "
-            "choose the best option and document your choice\n"
-            "3. Implement ALL changes immediately\n"
-            "4. Commit after each logical unit of work\n"
-            "5. After ALL implementation is done, write `docs/analysis.md` (see below)\n\n"
+            "## Core Principle\n"
+            "**Correctness over speed.** Take the time to understand the codebase thoroughly "
+            "before making changes. Read all related files — interfaces, callers, tests, "
+            "similar implementations — not just the files you expect to edit.\n\n"
+            "## Phase 1: Explore\n"
+            "- Read the codebase to understand the affected area: data structures, call flows, "
+            "existing patterns, and test coverage.\n"
+            "- Identify ALL files that need modification and any dependencies.\n"
+            "- Do NOT skip this phase. Incomplete understanding leads to incorrect implementation.\n\n"
+            "## Phase 2: Implement\n"
+            "- Implement changes following existing code conventions and patterns.\n"
+            "- Where you face a decision point (multiple valid approaches), choose the best option "
+            "and document it as a SELF-DECISION (see Analysis Report below).\n"
+            "- If a requirement is unclear or too broad to implement confidently, "
+            "implement the safe defensible subset and clearly document what remains.\n"
+            "- Do NOT silently deliver partial work. Do NOT make speculative changes "
+            "for unclear requirements.\n\n"
+            "## Phase 3: Verify\n"
+            "- Run existing tests for the affected area if a test suite exists.\n"
+            "- Add or update tests for changed behavior when feasible.\n"
+            "- If tests cannot be added or run, document why.\n\n"
+            "## Phase 4: Document & Commit\n"
+            "- Create `docs/analysis.md` (see below). This is the PR description.\n"
+            "- Make a single final commit after all implementation, tests, and documentation "
+            "are complete. Do NOT make intermediate commits.\n\n"
             "## Analysis Report (REQUIRED)\n"
-            "After completing all code changes, you MUST create a file `docs/analysis.md` "
-            "with the following sections:\n\n"
+            "You MUST create `docs/analysis.md` with these sections:\n\n"
             "```markdown\n"
             "## Summary\n"
             "Brief description of what was implemented and why.\n\n"
@@ -963,17 +983,23 @@ class Dispatcher:
             "| `path/to/file` | Modified / Created / Deleted |\n\n"
             "## Self-Decisions\n"
             "For each non-trivial decision made during implementation:\n"
-            "- SELF-DECISION: <title> — Chose <option> because <reasoning>. Alternative was <other option>.\n\n"
-            "If no decisions were made, write: 'No self-decisions were required.'\n"
+            "- SELF-DECISION: <title> — Chose <option> because <reasoning>. "
+            "Alternative was <other option>.\n\n"
+            "If no decisions were made, write: 'No self-decisions were required.'\n\n"
+            "## Reviewer Attention\n"
+            "Items that require human review before merging:\n"
+            "- (list any uncertain decisions, scope limitations, or untested areas)\n\n"
+            "If none, write: 'No items require special reviewer attention.'\n\n"
+            "## Test Status\n"
+            "- Tests run: (commands and results)\n"
+            "- Tests added/modified: (list or 'none')\n"
+            "- Untested areas: (list or 'none')\n"
             "```\n\n"
-            "This file will be used as the PR description. Do NOT skip it.\n\n"
-            "## Critical Rules\n"
-            "- Implement ALL items required by the issue. Partial implementation is NOT acceptable.\n"
-            "- Read ONLY files you will directly edit. Do NOT explore unrelated code.\n"
-            "- Start making code changes IMMEDIATELY after reading each target file.\n"
-            "- Commit after each logical unit of work.\n"
+            "## Rules\n"
+            "- Do not ask questions. If uncertain, make a safe decision and document it.\n"
+            "- Do not make speculative changes for unclear requirements.\n"
             "- The `docs/analysis.md` file MUST be your final action before finishing.\n\n"
-            "Work in the current directory. Do not ask questions — just implement."
+            "Work in the current directory."
         )
 
     _SELF_DECISION_RE = re.compile(
@@ -1021,6 +1047,34 @@ class Dispatcher:
         except Exception:
             return []
         return Dispatcher._extract_self_decisions(content)
+
+    _SECTION_RE_CACHE: dict[str, re.Pattern] = {}
+
+    @staticmethod
+    def _extract_section_from_docs(ws_path: str, heading: str) -> str:
+        """Extract a named section from docs/analysis.md, returning its body text."""
+        import os
+        analysis_path = os.path.join(ws_path, "docs", "analysis.md")
+        if not os.path.isfile(analysis_path):
+            return ""
+        try:
+            with open(analysis_path) as f:
+                content = f.read()
+        except Exception:
+            return ""
+        if heading not in Dispatcher._SECTION_RE_CACHE:
+            Dispatcher._SECTION_RE_CACHE[heading] = re.compile(
+                rf"##\s*{re.escape(heading)}\s*\n(.*?)(?=\n##\s|\Z)",
+                re.DOTALL | re.IGNORECASE,
+            )
+        m = Dispatcher._SECTION_RE_CACHE[heading].search(content)
+        if not m:
+            return ""
+        body = m.group(1).strip()
+        # Skip "none" / "no items" placeholder lines
+        if re.match(r"^(no |none|n/a)", body, re.IGNORECASE):
+            return ""
+        return body
 
     _DECISION_PATTERN = re.compile(r"DECISION-\d+", re.IGNORECASE)
 
