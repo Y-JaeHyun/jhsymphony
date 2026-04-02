@@ -91,15 +91,26 @@ class ClaudeProvider:
         return lines
 
     async def run_turn(self, session: dict[str, Any], prompt: str) -> AsyncIterator[AgentEvent]:
-        cmd = [
-            self._command,
-            "-p", prompt,
+        cmd = [self._command]
+
+        # Session resumption: --resume <name> reuses Phase 1 context
+        resume = session.get("resume_session")
+        if resume:
+            cmd.extend(["--resume", resume, "--fork-session"])
+
+        cmd.extend(["-p", prompt])
+        cmd.extend([
             "--output-format", "stream-json",
             "--verbose",
             "--permission-mode", "acceptEdits",
             "--model", self._model,
             "--max-turns", str(session.get("max_turns", self._max_turns)),
-        ]
+        ])
+
+        # Name the session for later resumption
+        session_name = session.get("session_name")
+        if session_name:
+            cmd.extend(["--name", session_name])
         try:
             import os
             run_env = os.environ.copy()

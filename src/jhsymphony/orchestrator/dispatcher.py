@@ -114,7 +114,10 @@ class Dispatcher:
 
     # ── Agent execution helpers ──
 
-    async def _run_agent(self, run_id: str, issue: Issue, provider: Any, prompt: str, workspace: Any) -> int:
+    async def _run_agent(
+        self, run_id: str, issue: Issue, provider: Any, prompt: str, workspace: Any,
+        session_name: str = "", resume_session: str = "",
+    ) -> int:
         """Run agent and record events. Returns event sequence count."""
         ctx = RunContext(
             workspace_path=str(workspace.path),
@@ -123,6 +126,10 @@ class Dispatcher:
             issue_body=issue.body,
         )
         session = await provider.start_session(ctx)
+        if session_name:
+            session["session_name"] = session_name
+        if resume_session:
+            session["resume_session"] = resume_session
         seq = 0
 
         async for event in provider.run_turn(session, prompt):
@@ -330,7 +337,9 @@ class Dispatcher:
                 f"Work in the current directory."
             )
 
-            await self._run_agent(run_id, issue, provider, prompt, workspace)
+            analysis_session_name = f"issue-{issue.id}-analysis"
+            await self._run_agent(run_id, issue, provider, prompt, workspace,
+                                  session_name=analysis_session_name)
 
             await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
             agent_response = await self._collect_agent_response(run_id)
@@ -434,13 +443,13 @@ class Dispatcher:
                         lines.append(f"- DECISION-{k}{scope}: {v}")
                     decisions_summary = "\n".join(lines)
 
-            # Build context-rich implementation prompt
-            prompt_parts = [
-                f"You are implementing GitHub issue #{issue.number}: {issue.title}\n",
-                f"## Original Issue\n{issue.body}\n",
-            ]
-            if analysis_text and analysis_text != "Analysis completed.":
-                prompt_parts.append(f"## Analysis Plan (from Phase 1)\n{analysis_text}\n")
+            # Build implementation prompt
+            # When resuming Phase 1 session, the codebase context is already loaded,
+            # so the prompt can focus on decisions and implementation instructions.
+            analysis_session_name = f"issue-{issue.id}-analysis"
+            impl_session_name = f"issue-{issue.id}-impl"
+
+            prompt_parts = []
             if decisions_summary:
                 prompt_parts.append(
                     f"## Admin Decisions\n{decisions_summary}\n\n"
@@ -450,7 +459,7 @@ class Dispatcher:
             if admin_decisions_text:
                 prompt_parts.append(f"## Admin Comments (raw)\n{admin_decisions_text}\n")
             prompt_parts.append(
-                "Implement the changes following the analysis plan above.\n"
+                "Now implement the changes based on the analysis plan you created.\n"
                 "Where the analysis identified DECISION points, follow the admin's chosen option "
                 "for that specific item only.\n\n"
                 "CRITICAL RULES:\n"
@@ -458,17 +467,23 @@ class Dispatcher:
                 "- Implement ALL Affected Files listed in the plan.\n"
                 "- Implement ALL steps from the Implementation Plan section.\n"
                 "- Do NOT create planning documents or docs/ files. Go straight to code implementation.\n"
-                "- MINIMIZE file reading. Read ONLY files you will directly edit or that are referenced in the plan.\n"
-                "- Do NOT scan directories or explore unrelated code. The plan already tells you which files to modify.\n"
-                "- Start making code changes as early as possible. Do not spend all turns on exploration.\n\n"
-                "Steps:\n"
-                "1. Read ONLY the specific files listed in Affected Files that you need to edit\n"
-                "2. Implement changes per the plan and decisions — ALL items, not just the first one\n"
-                "3. Commit after each logical unit of work (do not wait until the end)\n"
-                "4. Run tests if applicable\n\n"
+                "- You already explored the codebase during analysis. Do NOT re-read files unnecessarily.\n"
+                "- Read ONLY the specific file you are about to edit, right before editing it.\n"
+                "- Start making code changes IMMEDIATELY.\n"
+                "- Commit after each logical unit of work (do not wait until the end).\n\n"
                 "Work in the current directory. Do not ask questions — just implement."
             )
             prompt = "\n".join(prompt_parts)
+
+            # Fallback prompt with full context (when session resume is unavailable)
+            full_prompt_parts = [
+                f"You are implementing GitHub issue #{issue.number}: {issue.title}\n",
+                f"## Original Issue\n{issue.body}\n",
+            ]
+            if analysis_text and analysis_text != "Analysis completed.":
+                full_prompt_parts.append(f"## Analysis Plan\n{analysis_text}\n")
+            full_prompt_parts.append(prompt)
+            full_prompt = "\n".join(full_prompt_parts)
 
             ws_path = str(workspace.path)
             default_branch = await self._detect_default_branch(ws_path)
@@ -489,13 +504,19 @@ class Dispatcher:
                     break
 
                 if iteration == 0:
-                    await self._run_agent(run_id, issue, provider, prompt, workspace)
+                    # First run: resume Phase 1 session (codebase already in context)
+                    await self._run_agent(
+                        run_id, issue, provider, prompt, workspace,
+                        session_name=impl_session_name,
+                        resume_session=analysis_session_name,
+                    )
                 elif verification is not None and not has_changes:
-                    # Previous iteration read files but produced no changes — use focused prompt
+                    # Previous iteration read files but produced no changes — focused prompt
                     await self._run_continuation_no_changes(
                         run_id, issue, provider, workspace, manifest, analysis_text,
                     )
                 else:
+                    # Continuation: resume implementation session
                     diff_stat_result = await run_subprocess(
                         ["git", "diff", "--stat", f"origin/{default_branch}...HEAD"],
                         cwd=ws_path, env=None, timeout_sec=10,
