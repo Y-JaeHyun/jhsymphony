@@ -95,3 +95,27 @@ def test_usage_record():
         estimated_cost_usd=0.05,
     )
     assert record.total_tokens() == 1500
+
+
+def test_verification_result_defaults():
+    from jhsymphony.models import VerificationResult, ExecutionHealth, CompletenessLevel
+    vr = VerificationResult(event_count=50, exit_code=0, changed_files=["a.go", "b.go"])
+    assert vr.health == ExecutionHealth.OK
+    assert vr.completeness == CompletenessLevel.UNKNOWN
+    assert vr.coverage_ratio == 0.0
+    assert vr.remediation_attempted is False
+
+
+def test_execution_health_enum():
+    from jhsymphony.models import ExecutionHealth
+    assert ExecutionHealth.OK == "ok"
+    assert ExecutionHealth.SUSPECT == "suspect"
+    assert ExecutionHealth.FAILED == "failed"
+
+
+def test_completeness_level_enum():
+    from jhsymphony.models import CompletenessLevel
+    assert CompletenessLevel.COMPLETE == "complete"
+    assert CompletenessLevel.PARTIAL == "partial"
+    assert CompletenessLevel.INCOMPLETE == "incomplete"
+    assert CompletenessLevel.UNKNOWN == "unknown"

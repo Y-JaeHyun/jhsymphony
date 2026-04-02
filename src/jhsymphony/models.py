@@ -65,6 +65,39 @@ class EventType(StrEnum):
     ERROR = "error"
 
 
+class ExecutionHealth(StrEnum):
+    OK = "ok"
+    SUSPECT = "suspect"
+    FAILED = "failed"
+
+
+class CompletenessLevel(StrEnum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    INCOMPLETE = "incomplete"
+    UNKNOWN = "unknown"
+
+
+class PlanManifest(BaseModel):
+    required_files: list[str] = []
+    optional_files: list[str] = []
+    implementation_steps: list[dict] = []
+    expected_file_count_min: int = 0
+
+
+class VerificationResult(BaseModel):
+    health: ExecutionHealth = ExecutionHealth.OK
+    completeness: CompletenessLevel = CompletenessLevel.UNKNOWN
+    coverage_ratio: float = 0.0
+    missing_files: list[str] = []
+    changed_files: list[str] = []
+    event_count: int = 0
+    exit_code: int = 0
+    has_error_events: bool = False
+    remediation_attempted: bool = False
+    remediation_helped: bool = False
+
+
 class Issue(BaseModel):
     id: str
     number: int
