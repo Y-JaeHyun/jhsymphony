@@ -510,3 +510,50 @@ async def test_build_verification_report_complete():
     report = Dispatcher._build_verification_report(result)
     assert "100%" in report
     assert "Missing" not in report
+
+
+async def test_run_remediation_builds_correct_prompt(storage, mock_workspace_mgr, mock_tracker):
+    """Remediation should build a prompt referencing missing items."""
+    captured_prompt = {}
+
+    claude_provider = AsyncMock()
+    claude_provider.name = "claude"
+
+    async def capture_run_turn(session, prompt):
+        captured_prompt["value"] = prompt
+        from jhsymphony.providers.base import AgentEvent, EventType
+        yield AgentEvent(type=EventType.COMPLETED, data={"reason": "done", "exit_code": 0})
+
+    claude_provider.run_turn = capture_run_turn
+
+    router = MagicMock()
+    router.get.return_value = claude_provider
+
+    lease_mgr = LeaseManager(storage=storage, owner_id="test", ttl_sec=60)
+    disp = Dispatcher(
+        storage=storage, lease_manager=lease_mgr, workspace_manager=mock_workspace_mgr,
+        provider_router=router, tracker=mock_tracker, bot_login="test-bot",
+    )
+
+    issue = Issue(id="gh-rem", number=10, repo="o/r", title="Fix stuff", body="body")
+    await storage.upsert_issue(issue)
+    run_id = "run-rem"
+    await storage.insert_run(Run(id=run_id, issue_id="gh-rem", provider="claude", status=RunStatus.RUNNING))
+
+    workspace = MagicMock(path=Path("/tmp/ws"), branch="jhsymphony/issue-10")
+    manifest = PlanManifest(
+        required_files=["foo.go", "bar.go"],
+        implementation_steps=[
+            {"id": 1, "name": "step one", "critical": True},
+            {"id": 2, "name": "step two", "critical": True},
+        ],
+    )
+    missing = ["bar.go"]
+    diff_stat = "foo.go | 10 ++++\n 1 file changed"
+
+    await disp._run_remediation(run_id, issue, claude_provider, workspace, manifest, missing, diff_stat)
+
+    prompt = captured_prompt["value"]
+    assert "bar.go" in prompt
+    assert "step one" in prompt or "step two" in prompt
+    assert "already" in prompt.lower()

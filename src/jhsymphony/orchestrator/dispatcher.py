@@ -750,6 +750,46 @@ class Dispatcher:
         lines.append(f"- **Exit code**: {result.exit_code}")
         return "\n".join(lines)
 
+    async def _run_remediation(
+        self,
+        run_id: str,
+        issue: Issue,
+        provider: Any,
+        workspace: Any,
+        manifest: PlanManifest,
+        missing_files: list[str],
+        diff_stat: str,
+    ) -> int:
+        """Targeted second Claude CLI run to fill gaps from incomplete first run."""
+        steps_text = ""
+        if manifest.implementation_steps:
+            steps_text = "\n".join(
+                f"- Step {s['id']}: {s['name']}" for s in manifest.implementation_steps
+            )
+
+        missing_text = "\n".join(f"- {f}" for f in missing_files)
+
+        prompt = (
+            f"You are continuing implementation of GitHub issue #{issue.number}: {issue.title}\n\n"
+            f"## Original Issue\n{issue.body}\n\n"
+            f"## What is already done\n"
+            f"The following changes have already been committed to this branch:\n"
+            f"```\n{diff_stat}\n```\n\n"
+            f"## What is still missing\n"
+            f"The following required files were NOT modified and still need implementation:\n"
+            f"{missing_text}\n\n"
+        )
+        if steps_text:
+            prompt += f"## Full plan steps (for reference)\n{steps_text}\n\n"
+        prompt += (
+            "CRITICAL: Focus ONLY on the missing items listed above.\n"
+            "The code from previous steps is already committed — read it first to understand what exists.\n"
+            "Do NOT re-implement or modify files that are already done.\n"
+            "Implement the remaining work, then commit.\n"
+        )
+
+        return await self._run_agent(run_id, issue, provider, prompt, workspace)
+
     async def cancel_run(self, run_id: str) -> None:
         task = self._tasks.get(run_id)
         if task is not None and not task.done():
