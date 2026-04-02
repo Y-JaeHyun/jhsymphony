@@ -36,43 +36,79 @@ class ClaudeProvider:
             "process": None,
         }
 
-    def _parse_event(self, msg: dict[str, Any]) -> AgentEvent | None:
+    def _parse_events(self, msg: dict[str, Any]) -> list[AgentEvent]:
+        """Parse a stream-json message into one or more AgentEvents.
+
+        Claude CLI stream-json format nests tool_use/tool_result blocks inside
+        assistant/user messages. We extract them as separate events so that
+        health-check and verification logic can detect tool usage.
+        """
         msg_type = msg.get("type", "")
+        events: list[AgentEvent] = []
+
         if msg_type in ("assistant", "message"):
-            # Claude CLI nests content: msg["message"]["content"]
             message = msg.get("message", msg)
             content = message.get("content", "")
             if isinstance(content, list):
-                text_parts = [
-                    block.get("text", "")
-                    for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                ]
+                text_parts = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type", "")
+                    if btype == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif btype == "tool_use":
+                        events.append(AgentEvent(
+                            type=EventType.TOOL_CALL,
+                            data={"tool": block.get("name", ""), "input": block.get("input", {})},
+                        ))
+                    elif btype == "tool_result":
+                        events.append(AgentEvent(
+                            type=EventType.TOOL_RESULT,
+                            data={"content": block.get("content", "")},
+                        ))
                 text = "".join(text_parts)
             else:
                 text = str(content)
-            return AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": text})
+            if text.strip():
+                events.insert(0, AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": text}))
+            return events
+
+        if msg_type == "user":
+            # user messages may contain tool_result blocks
+            message = msg.get("message", msg)
+            content = message.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        events.append(AgentEvent(
+                            type=EventType.TOOL_RESULT,
+                            data={"content": block.get("content", "")},
+                        ))
+            return events
+
         if msg_type == "result":
-            # Claude CLI puts final text in msg["result"], but this duplicates
-            # the text already emitted via assistant/message events.
-            # Map to COMPLETED so _collect_agent_response can use it as fallback only.
             text = msg.get("result", "")
-            return AgentEvent(type=EventType.COMPLETED, data={"text": str(text) if text else "", "reason": "result"})
+            return [AgentEvent(type=EventType.COMPLETED, data={"text": str(text) if text else "", "reason": "result"})]
+
+        # Top-level tool_use/tool_result (rare but possible)
         if msg_type == "tool_use":
-            return AgentEvent(
+            return [AgentEvent(
                 type=EventType.TOOL_CALL,
                 data={"tool": msg.get("name", ""), "input": msg.get("input", {})},
-            )
+            )]
         if msg_type == "tool_result":
-            return AgentEvent(
+            return [AgentEvent(
                 type=EventType.TOOL_RESULT,
                 data={"content": msg.get("content", "")},
-            )
+            )]
+
         if msg_type == "usage":
-            return AgentEvent(type=EventType.USAGE, data=msg)
+            return [AgentEvent(type=EventType.USAGE, data=msg)]
         if msg_type in ("error", "exception"):
-            return AgentEvent(type=EventType.ERROR, data={"error": msg.get("message", str(msg))})
-        return None
+            return [AgentEvent(type=EventType.ERROR, data={"error": msg.get("message", str(msg))})]
+
+        return []
 
     @staticmethod
     async def _drain_stderr(proc: asyncio.subprocess.Process) -> list[str]:
@@ -124,8 +160,7 @@ class ClaudeProvider:
                     continue
                 try:
                     msg = json.loads(text)
-                    event = self._parse_event(msg)
-                    if event is not None:
+                    for event in self._parse_events(msg):
                         yield event
                 except json.JSONDecodeError:
                     yield AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": text})

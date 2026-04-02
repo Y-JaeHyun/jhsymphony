@@ -1214,6 +1214,10 @@ class Dispatcher:
 
         Returns CHECKPOINT when max_turns was likely exceeded (exit_code!=0 but
         evidence of productive work with no explicit errors).
+
+        Handles dual-completed events: Claude CLI emits a 'result' event for
+        logical completion, then the process may exit with non-zero code (e.g.
+        max_turns hit). If we see reason=result, that's a logical success.
         """
         events = await self._storage.list_events(run_id, since_seq=-1)
         event_count = len(events)
@@ -1222,17 +1226,23 @@ class Dispatcher:
         budget_killed = False
         stderr_text = ""
         has_tool_calls = False
+        has_logical_result = False
 
         for evt in events:
             evt_type = evt.get("type") or evt.get("event_type", "")
             payload = evt.get("payload", {})
 
             if evt_type == "completed":
-                exit_code = payload.get("exit_code", 0)
-                stderr_text = payload.get("stderr", "")
+                reason = payload.get("reason", "")
+                if reason == "result":
+                    has_logical_result = True
+                if payload.get("exit_code") is not None:
+                    exit_code = payload["exit_code"]
+                if payload.get("stderr"):
+                    stderr_text = payload["stderr"]
             elif evt_type == "error":
                 has_error = True
-            elif evt_type == "tool.call":
+            elif evt_type in ("tool.call", "tool_call"):
                 has_tool_calls = True
 
         run_cost = await self._storage.sum_run_cost(run_id)
@@ -1245,6 +1255,7 @@ class Dispatcher:
             "has_error": has_error,
             "budget_killed": budget_killed,
             "stderr": stderr_text,
+            "has_logical_result": has_logical_result,
         }
 
         if exit_code == 0 and not has_error:
@@ -1255,6 +1266,11 @@ class Dispatcher:
         # exit_code != 0 — distinguish max_turns (CHECKPOINT) from real errors
         if has_error:
             return ExecutionHealth.FAILED, info
+
+        # If we received a logical 'result' event but process exited non-zero,
+        # treat as OK if substantial work was done (CLI post-processing issue)
+        if has_logical_result and event_count >= 10:
+            return ExecutionHealth.OK, info
 
         # Heuristic: if there were tool calls and many events, likely max_turns exceeded
         is_max_turns = (
