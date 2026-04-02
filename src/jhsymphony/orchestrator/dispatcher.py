@@ -6,7 +6,7 @@ import re
 import uuid
 from typing import Any
 
-from jhsymphony.models import Issue, IssueState, Run, RunStatus, UsageRecord
+from jhsymphony.models import Issue, IssueState, PlanManifest, Run, RunStatus, UsageRecord
 from jhsymphony.orchestrator.lease import LeaseManager
 from jhsymphony.providers.base import EventType, RunContext
 from jhsymphony.storage.base import Storage
@@ -596,6 +596,51 @@ class Dispatcher:
             decisions[m.group(1)] = m.group(2).strip()
 
         return decisions, raw_text
+
+    _MANIFEST_RE = re.compile(
+        r"<!--\s*plan-manifest\s*-->\s*```json\s*\n(.*?)```",
+        re.DOTALL,
+    )
+    _AFFECTED_FILES_ROW_RE = re.compile(
+        r"^\|\s*`?([^`|]+?)`?\s*\|",
+        re.MULTILINE,
+    )
+
+    @staticmethod
+    def _parse_plan_manifest(analysis_text: str) -> PlanManifest | None:
+        import json as _json
+
+        # Strategy 1: explicit manifest block
+        m = Dispatcher._MANIFEST_RE.search(analysis_text)
+        if m:
+            try:
+                data = _json.loads(m.group(1))
+                return PlanManifest(**data)
+            except (ValueError, TypeError):
+                logger.warning("Failed to parse plan manifest JSON")
+
+        # Strategy 2: fallback — extract from Affected Files table
+        table_start = analysis_text.find("## Affected Files")
+        if table_start < 0:
+            return None
+
+        table_section = analysis_text[table_start:]
+        next_heading = table_section.find("\n## ", 1)
+        if next_heading > 0:
+            table_section = table_section[:next_heading]
+
+        files: list[str] = []
+        for row_match in Dispatcher._AFFECTED_FILES_ROW_RE.finditer(table_section):
+            path = row_match.group(1).strip()
+            if path.lower() in ("file", "---", "------"):
+                continue
+            if "/" in path or "." in path:
+                files.append(path)
+
+        if not files:
+            return None
+
+        return PlanManifest(required_files=files, expected_file_count_min=len(files))
 
     async def cancel_run(self, run_id: str) -> None:
         task = self._tasks.get(run_id)

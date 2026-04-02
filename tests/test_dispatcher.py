@@ -273,3 +273,64 @@ async def test_cancel_run(dispatcher, storage):
     run = await storage.get_run(run_id)
     assert run is not None
     assert run.status in (RunStatus.CANCELLED, RunStatus.COMPLETED)
+
+
+from jhsymphony.models import PlanManifest
+
+
+async def test_parse_plan_manifest_from_analysis():
+    """Should extract JSON manifest from analysis text."""
+    analysis = '''## Summary
+Some plan text.
+
+## Affected Files
+| File | Change |
+|------|--------|
+| foo.go | Modify |
+
+<!-- plan-manifest -->
+```json
+{
+  "required_files": ["foo.go", "bar.go"],
+  "optional_files": ["baz.go"],
+  "implementation_steps": [{"id": 1, "name": "step one", "critical": true}],
+  "expected_file_count_min": 2
+}
+```
+
+## Implementation Plan
+Details here.
+'''
+    manifest = Dispatcher._parse_plan_manifest(analysis)
+    assert manifest is not None
+    assert manifest.required_files == ["foo.go", "bar.go"]
+    assert manifest.optional_files == ["baz.go"]
+    assert len(manifest.implementation_steps) == 1
+    assert manifest.expected_file_count_min == 2
+
+
+async def test_parse_plan_manifest_missing():
+    """Should return None when no manifest block exists."""
+    analysis = "## Summary\nJust a plan without manifest."
+    manifest = Dispatcher._parse_plan_manifest(analysis)
+    assert manifest is None
+
+
+async def test_parse_plan_manifest_fallback_from_affected_files():
+    """Should extract file list from Affected Files table as fallback."""
+    analysis = '''## Affected Files
+
+| File | Change Type | Description |
+|------|------------|-------------|
+| `src/foo/Bar.go` | Modify | Add field |
+| `src/foo/Baz.go` | **New** | New file |
+| `tests/test_bar.go` | Modify | Update tests |
+
+## Implementation Plan
+Step 1, step 2.
+'''
+    manifest = Dispatcher._parse_plan_manifest(analysis)
+    assert manifest is not None
+    assert "src/foo/Bar.go" in manifest.required_files
+    assert "src/foo/Baz.go" in manifest.required_files
+    assert "tests/test_bar.go" in manifest.required_files
