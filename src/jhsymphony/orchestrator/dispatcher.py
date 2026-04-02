@@ -457,13 +457,15 @@ class Dispatcher:
                 "- You MUST implement ALL items from the analysis plan. Partial implementation is NOT acceptable.\n"
                 "- Implement ALL Affected Files listed in the plan.\n"
                 "- Implement ALL steps from the Implementation Plan section.\n"
-                "- Do NOT create planning documents or docs/ files. Go straight to code implementation.\n\n"
+                "- Do NOT create planning documents or docs/ files. Go straight to code implementation.\n"
+                "- MINIMIZE file reading. Read ONLY files you will directly edit or that are referenced in the plan.\n"
+                "- Do NOT scan directories or explore unrelated code. The plan already tells you which files to modify.\n"
+                "- Start making code changes as early as possible. Do not spend all turns on exploration.\n\n"
                 "Steps:\n"
-                "1. Read relevant code to understand the codebase\n"
+                "1. Read ONLY the specific files listed in Affected Files that you need to edit\n"
                 "2. Implement changes per the plan and decisions — ALL items, not just the first one\n"
-                "3. Write or update tests\n"
-                "4. Run tests\n"
-                "5. Commit with descriptive messages\n\n"
+                "3. Commit after each logical unit of work (do not wait until the end)\n"
+                "4. Run tests if applicable\n\n"
                 "Work in the current directory. Do not ask questions — just implement."
             )
             prompt = "\n".join(prompt_parts)
@@ -488,6 +490,11 @@ class Dispatcher:
 
                 if iteration == 0:
                     await self._run_agent(run_id, issue, provider, prompt, workspace)
+                elif verification is not None and not has_changes:
+                    # Previous iteration read files but produced no changes — use focused prompt
+                    await self._run_continuation_no_changes(
+                        run_id, issue, provider, workspace, manifest, analysis_text,
+                    )
                 else:
                     diff_stat_result = await run_subprocess(
                         ["git", "diff", "--stat", f"origin/{default_branch}...HEAD"],
@@ -501,15 +508,6 @@ class Dispatcher:
                 # Commit any uncommitted changes
                 has_changes = await self._has_code_changes(ws_path, default_branch, issue)
 
-                if not has_changes and iteration == 0:
-                    await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
-                    await self._tracker.post_comment(
-                        issue.number,
-                        f"**JHSymphony** completed the implementation but no code changes were detected.\n*Run: `{run_id}`*",
-                    )
-                    await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
-                    return
-
                 # Verify execution
                 diff_result = await run_subprocess(
                     ["git", "diff", "--name-only", f"origin/{default_branch}...HEAD"],
@@ -517,6 +515,34 @@ class Dispatcher:
                 )
                 changed_files = [f for f in diff_result.stdout.strip().split("\n") if f]
                 verification = await self._verify_execution(run_id, manifest, changed_files)
+
+                # CHECKPOINT + no changes → agent spent all turns reading, continue
+                if not has_changes and verification.health == ExecutionHealth.CHECKPOINT:
+                    if iteration < max_continuations:
+                        logger.info("Run %s: CHECKPOINT with no changes (iteration %d), continuing to implement", run_id, iteration)
+                        continue
+                    # Exhausted continuations with no changes at all
+                    await self._storage.update_run_status(run_id, RunStatus.FAILED, error="no_changes_after_continuations")
+                    await self._tracker.post_comment(
+                        issue.number,
+                        f"**JHSymphony** could not produce code changes after {iteration + 1} attempts.\n*Run: `{run_id}`*",
+                    )
+                    await self._storage.update_issue_state(issue.id, IssueState.FAILED)
+                    try:
+                        await self._tracker.remove_label(issue.number, "approved")
+                    except Exception:
+                        pass
+                    return
+
+                # OK/SUSPECT + no changes → genuinely nothing to do
+                if not has_changes:
+                    await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
+                    await self._tracker.post_comment(
+                        issue.number,
+                        f"**JHSymphony** completed the implementation but no code changes were detected.\n*Run: `{run_id}`*",
+                    )
+                    await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
+                    return
 
                 # FAILED with no changes at all → abort
                 if verification.health == ExecutionHealth.FAILED and not has_changes:
@@ -943,6 +969,52 @@ class Dispatcher:
             "The code from previous steps is already committed — read it first to understand what exists.\n"
             "Do NOT re-implement or modify files that are already done.\n"
             "Implement the remaining work, then commit.\n"
+        )
+
+        return await self._run_agent(run_id, issue, provider, prompt, workspace)
+
+    async def _run_continuation_no_changes(
+        self,
+        run_id: str,
+        issue: Issue,
+        provider: Any,
+        workspace: Any,
+        manifest: PlanManifest | None,
+        analysis_text: str,
+    ) -> int:
+        """Continuation when previous iteration read the codebase but produced no changes."""
+        required_files = ""
+        steps_text = ""
+        if manifest:
+            required_files = "\n".join(f"- {f}" for f in manifest.required_files)
+            if manifest.implementation_steps:
+                steps_text = "\n".join(
+                    f"- Step {s['id']}: {s['name']}" for s in manifest.implementation_steps
+                )
+
+        prompt = (
+            f"You are implementing GitHub issue #{issue.number}: {issue.title}\n\n"
+            f"## Original Issue\n{issue.body}\n\n"
+        )
+        if analysis_text and analysis_text != "Analysis completed.":
+            prompt += f"## Analysis Plan\n{analysis_text}\n\n"
+        prompt += (
+            "## CRITICAL: Previous attempt failed\n"
+            "The previous execution spent all its turns reading files and produced NO code changes.\n"
+            "Do NOT repeat broad codebase exploration.\n\n"
+            "## Rules for this attempt\n"
+            "- Read ONLY the specific files you will directly edit (listed below)\n"
+            "- Do NOT scan directories or read unrelated files\n"
+            "- Start implementing IMMEDIATELY after reading each target file\n"
+            "- Make at least one concrete code change before doing anything else\n\n"
+        )
+        if required_files:
+            prompt += f"## Target files to modify\n{required_files}\n\n"
+        if steps_text:
+            prompt += f"## Implementation steps\n{steps_text}\n\n"
+        prompt += (
+            "Work in the current directory. Implement the changes now.\n"
+            "Commit with descriptive messages after each logical unit of work.\n"
         )
 
         return await self._run_agent(run_id, issue, provider, prompt, workspace)
