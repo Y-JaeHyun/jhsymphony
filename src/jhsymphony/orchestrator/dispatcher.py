@@ -6,7 +6,10 @@ import re
 import uuid
 from typing import Any
 
-from jhsymphony.models import CompletenessLevel, ExecutionHealth, Issue, IssueState, PlanManifest, Run, RunStatus, UsageRecord
+from jhsymphony.models import (
+    CompletenessLevel, ExecutionHealth, Issue, IssueState,
+    PlanManifest, Run, RunStatus, UsageRecord, VerificationResult,
+)
 from jhsymphony.orchestrator.lease import LeaseManager
 from jhsymphony.providers.base import EventType, RunContext
 from jhsymphony.storage.base import Storage
@@ -709,6 +712,24 @@ class Dispatcher:
             level = CompletenessLevel.INCOMPLETE
 
         return level, ratio, missing
+
+    async def _verify_execution(
+        self, run_id: str, manifest: PlanManifest | None, changed_files: list[str]
+    ) -> VerificationResult:
+        """Run Gate 1 (health) and Gate 2 (completeness), return combined result."""
+        health, info = await self._check_execution_health(run_id)
+        completeness, ratio, missing = self._check_completeness(manifest, changed_files)
+
+        return VerificationResult(
+            health=health,
+            completeness=completeness,
+            coverage_ratio=ratio,
+            missing_files=missing,
+            changed_files=changed_files,
+            event_count=info["event_count"],
+            exit_code=info["exit_code"],
+            has_error_events=info["has_error"],
+        )
 
     async def cancel_run(self, run_id: str) -> None:
         task = self._tasks.get(run_id)

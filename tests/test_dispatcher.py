@@ -432,3 +432,46 @@ async def test_completeness_no_manifest():
     level, ratio, missing = Dispatcher._check_completeness(None, ["a.go"])
     assert level == CompletenessLevel.UNKNOWN
     assert ratio == 0.0
+
+
+from jhsymphony.models import VerificationResult
+
+
+async def test_verify_execution_complete(dispatcher, storage):
+    """Healthy run with full coverage → COMPLETE verdict."""
+    run_id = "run-verify-ok"
+    await storage.insert_run(Run(id=run_id, issue_id="gh-1", provider="claude", status=RunStatus.RUNNING))
+    for i in range(15):
+        await storage.insert_event(run_id, i, "message.delta", {"text": f"chunk {i}"})
+    await storage.insert_event(run_id, 15, "completed", {"exit_code": 0, "reason": "done"})
+
+    manifest = PlanManifest(required_files=["foo.go", "bar.go"])
+    result = await dispatcher._verify_execution(run_id, manifest, ["foo.go", "bar.go"])
+    assert result.health == ExecutionHealth.OK
+    assert result.completeness == CompletenessLevel.COMPLETE
+    assert result.coverage_ratio == 1.0
+    assert result.missing_files == []
+
+
+async def test_verify_execution_failed(dispatcher, storage):
+    """Error in execution → FAILED health."""
+    run_id = "run-verify-fail"
+    await storage.insert_run(Run(id=run_id, issue_id="gh-1", provider="claude", status=RunStatus.RUNNING))
+    await storage.insert_event(run_id, 0, "error", {"error": "crash"})
+
+    manifest = PlanManifest(required_files=["foo.go"])
+    result = await dispatcher._verify_execution(run_id, manifest, [])
+    assert result.health == ExecutionHealth.FAILED
+
+
+async def test_verify_execution_no_manifest(dispatcher, storage):
+    """No manifest → UNKNOWN completeness, still OK health."""
+    run_id = "run-verify-noplan"
+    await storage.insert_run(Run(id=run_id, issue_id="gh-1", provider="claude", status=RunStatus.RUNNING))
+    for i in range(15):
+        await storage.insert_event(run_id, i, "message.delta", {"text": f"chunk {i}"})
+    await storage.insert_event(run_id, 15, "completed", {"exit_code": 0, "reason": "done"})
+
+    result = await dispatcher._verify_execution(run_id, None, ["some.go"])
+    assert result.health == ExecutionHealth.OK
+    assert result.completeness == CompletenessLevel.UNKNOWN
