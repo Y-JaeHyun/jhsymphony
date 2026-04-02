@@ -53,9 +53,11 @@ class ClaudeProvider:
                 text = str(content)
             return AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": text})
         if msg_type == "result":
-            # Claude CLI puts final text in msg["result"]
+            # Claude CLI puts final text in msg["result"], but this duplicates
+            # the text already emitted via assistant/message events.
+            # Map to COMPLETED so _collect_agent_response can use it as fallback only.
             text = msg.get("result", "")
-            return AgentEvent(type=EventType.MESSAGE_DELTA, data={"text": str(text) if text else ""})
+            return AgentEvent(type=EventType.COMPLETED, data={"text": str(text) if text else "", "reason": "result"})
         if msg_type == "tool_use":
             return AgentEvent(
                 type=EventType.TOOL_CALL,

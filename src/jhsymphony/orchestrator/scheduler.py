@@ -19,12 +19,14 @@ class Scheduler:
         dispatcher: Any,
         reconciler: Any,
         poll_interval_sec: int = 30,
+        repo: str = "",
     ) -> None:
         self._storage = storage
         self._tracker = tracker
         self._dispatcher = dispatcher
         self._reconciler = reconciler
         self._poll_interval = poll_interval_sec
+        self._repo = repo
         self._running = False
 
     async def tick(self) -> None:
@@ -59,13 +61,21 @@ class Scheduler:
         for issue in issues:
             if issue.state != IssueState.AWAITING_APPROVAL:
                 continue
+            # Only process issues belonging to this scheduler's repo
+            if self._repo and issue.repo != self._repo:
+                continue
             try:
                 is_approved = await self._tracker.check_approved(issue.number)
                 if is_approved:
                     logger.info("Issue %s (#%d) has been approved!", issue.id, issue.number)
-                    await self._dispatcher.dispatch_approved(issue)
+                    run_id = await self._dispatcher.dispatch_approved(issue)
+                    if run_id is None:
+                        logger.warning(
+                            "Issue %s (#%d) approved but dispatch_approved returned None (lease held?)",
+                            issue.id, issue.number,
+                        )
             except Exception:
-                logger.debug("Failed to check approval for issue %s", issue.id, exc_info=True)
+                logger.warning("Failed to check approval for issue %s", issue.id, exc_info=True)
 
     async def run(self) -> None:
         self._running = True

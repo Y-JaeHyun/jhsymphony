@@ -84,21 +84,30 @@ class Dispatcher:
         if not acquired:
             return None
 
-        run_id = str(uuid.uuid4())
-        # Always use Claude for implementation, fallback to label-based routing
-        provider = self._router.get("claude") or self._router.select(issue.labels)
-        _name_attr = getattr(provider, "name", None)
-        provider_name = _name_attr if isinstance(_name_attr, str) else type(provider).__name__
+        try:
+            # Immediately transition state so other schedulers won't re-process
+            await self._storage.update_issue_state(issue.id, IssueState.LEASED)
 
-        run = Run(id=run_id, issue_id=issue.id, provider=provider_name, status=RunStatus.STARTING)
-        await self._storage.insert_run(run)
+            run_id = str(uuid.uuid4())
+            # Always use Claude for implementation, fallback to label-based routing
+            provider = self._router.get("claude") or self._router.select(issue.labels)
+            _name_attr = getattr(provider, "name", None)
+            provider_name = _name_attr if isinstance(_name_attr, str) else type(provider).__name__
 
-        task = asyncio.create_task(self._execute_implementation(run_id, issue, provider))
-        self._tasks[run_id] = task
-        task.add_done_callback(lambda t: self._tasks.pop(run_id, None))
+            run = Run(id=run_id, issue_id=issue.id, provider=provider_name, status=RunStatus.STARTING)
+            await self._storage.insert_run(run)
 
-        logger.info("Dispatched implementation run %s for approved issue %s using Claude", run_id, issue.id)
-        return run_id
+            task = asyncio.create_task(self._execute_implementation(run_id, issue, provider))
+            self._tasks[run_id] = task
+            task.add_done_callback(lambda t: self._tasks.pop(run_id, None))
+
+            logger.info("Dispatched implementation run %s for approved issue %s using Claude", run_id, issue.id)
+            return run_id
+        except Exception:
+            logger.exception("Failed to dispatch approved issue %s, releasing lease", issue.id)
+            await self._lease_manager.release(issue.id)
+            await self._storage.update_issue_state(issue.id, IssueState.AWAITING_APPROVAL)
+            return None
 
     # ── Agent execution helpers ──
 
@@ -138,6 +147,7 @@ class Dispatcher:
         """Collect agent text output from message.delta and tool_result events."""
         events = await self._storage.list_events(run_id)
         message_parts: list[str] = []
+        result_text: str = ""
         last_tool_result: str = ""
 
         for evt in events:
@@ -148,6 +158,12 @@ class Dispatcher:
                 text = payload.get("text", "")
                 if text.strip():
                     message_parts.append(text)
+            elif evt_type == "completed":
+                # Claude CLI 'result' event — use as fallback only to avoid
+                # duplicating the text already captured via message.delta.
+                text = payload.get("text", "")
+                if text and text.strip():
+                    result_text = text.strip()
             elif evt_type == "tool.result":
                 # Keep track of the last substantial tool result as fallback
                 content = payload.get("content", "")
@@ -164,8 +180,12 @@ class Dispatcher:
         if message_parts:
             return "\n".join(message_parts)
 
+        if result_text:
+            logger.info("Run %s: no message.delta events, using result event text", run_id)
+            return result_text
+
         if last_tool_result:
-            logger.warning("Run %s: no message.delta events, falling back to last tool_result", run_id)
+            logger.warning("Run %s: no message.delta or result events, falling back to last tool_result", run_id)
             return last_tool_result
 
         logger.warning("Run %s: no agent text output collected", run_id)

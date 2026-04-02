@@ -92,6 +92,7 @@ async def run_repo(
         max_concurrent=max_concurrent,
         budget_daily_limit=budget_daily,
         budget_per_run_limit=budget_per_run,
+        bot_login=repo_config.bot_login if hasattr(repo_config, "bot_login") else "",
     )
 
     reconciler = Reconciler(storage=storage, tracker=tracker, dispatcher=dispatcher, repo=repo)
@@ -102,6 +103,7 @@ async def run_repo(
         dispatcher=dispatcher,
         reconciler=reconciler,
         poll_interval_sec=repo_config.poll_interval_sec,
+        repo=repo,
     )
 
     logger.info("Monitoring %s (label=%s, poll=%ds)", repo, repo_config.label, repo_config.poll_interval_sec)
