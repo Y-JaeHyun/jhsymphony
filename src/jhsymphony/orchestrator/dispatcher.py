@@ -6,7 +6,7 @@ import re
 import uuid
 from typing import Any
 
-from jhsymphony.models import ExecutionHealth, Issue, IssueState, PlanManifest, Run, RunStatus, UsageRecord
+from jhsymphony.models import CompletenessLevel, ExecutionHealth, Issue, IssueState, PlanManifest, Run, RunStatus, UsageRecord
 from jhsymphony.orchestrator.lease import LeaseManager
 from jhsymphony.providers.base import EventType, RunContext
 from jhsymphony.storage.base import Storage
@@ -675,6 +675,40 @@ class Dispatcher:
         if event_count < 10 or budget_killed:
             return ExecutionHealth.SUSPECT, info
         return ExecutionHealth.OK, info
+
+    @staticmethod
+    def _check_completeness(
+        manifest: PlanManifest | None, changed_files: list[str]
+    ) -> tuple[CompletenessLevel, float, list[str]]:
+        """Gate 2: Compare plan manifest against actually changed files."""
+        import os
+
+        if manifest is None or not manifest.required_files:
+            return CompletenessLevel.UNKNOWN, 0.0, []
+
+        changed_basenames = {os.path.basename(f) for f in changed_files}
+        changed_full = set(changed_files)
+
+        covered = []
+        missing = []
+        for req in manifest.required_files:
+            req_basename = os.path.basename(req)
+            if req in changed_full or req_basename in changed_basenames:
+                covered.append(req)
+            else:
+                missing.append(req)
+
+        total = len(manifest.required_files)
+        ratio = len(covered) / total
+
+        if ratio >= 0.8:
+            level = CompletenessLevel.COMPLETE
+        elif ratio >= 0.5:
+            level = CompletenessLevel.PARTIAL
+        else:
+            level = CompletenessLevel.INCOMPLETE
+
+        return level, ratio, missing
 
     async def cancel_run(self, run_id: str) -> None:
         task = self._tasks.get(run_id)

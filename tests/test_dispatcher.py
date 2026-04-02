@@ -275,7 +275,7 @@ async def test_cancel_run(dispatcher, storage):
     assert run.status in (RunStatus.CANCELLED, RunStatus.COMPLETED)
 
 
-from jhsymphony.models import PlanManifest
+from jhsymphony.models import CompletenessLevel, PlanManifest
 
 
 async def test_parse_plan_manifest_from_analysis():
@@ -380,3 +380,55 @@ async def test_health_check_suspect_low_events(dispatcher, storage):
     await storage.insert_event(run_id, 1, "completed", {"exit_code": 0, "reason": "done"})
     health, info = await dispatcher._check_execution_health(run_id)
     assert health == ExecutionHealth.SUSPECT
+
+
+async def test_completeness_complete():
+    """All required files changed → COMPLETE."""
+    manifest = PlanManifest(required_files=["src/foo/Bar.go", "src/foo/Baz.go"])
+    changed = ["src/foo/Bar.go", "src/foo/Baz.go", "README.md"]
+    level, ratio, missing = Dispatcher._check_completeness(manifest, changed)
+    assert level == CompletenessLevel.COMPLETE
+    assert ratio == 1.0
+    assert missing == []
+
+
+async def test_completeness_partial():
+    """50-79% coverage → PARTIAL."""
+    manifest = PlanManifest(required_files=["a.go", "b.go", "c.go", "d.go"])
+    changed = ["a.go", "b.go", "c.go"]
+    level, ratio, missing = Dispatcher._check_completeness(manifest, changed)
+    assert level == CompletenessLevel.PARTIAL
+    assert ratio == 0.75
+    assert missing == ["d.go"]
+
+
+async def test_completeness_incomplete():
+    """< 50% coverage → INCOMPLETE."""
+    manifest = PlanManifest(required_files=["a.go", "b.go", "c.go", "d.go"])
+    changed = ["a.go"]
+    level, ratio, missing = Dispatcher._check_completeness(manifest, changed)
+    assert level == CompletenessLevel.INCOMPLETE
+    assert 0.25 == ratio
+    assert set(missing) == {"b.go", "c.go", "d.go"}
+
+
+async def test_completeness_basename_matching():
+    """Should match by basename when full paths differ."""
+    manifest = PlanManifest(required_files=[
+        "whatap.agent/src/whatap/agent/counter/helper/MetricHelperLinux.go",
+        "whatap.agent/src/whatap/osinfo/MemoryLinux.go",
+    ])
+    changed = [
+        "src/whatap/agent/counter/helper/MetricHelperLinux.go",
+        "src/whatap/osinfo/MemoryLinux.go",
+    ]
+    level, ratio, missing = Dispatcher._check_completeness(manifest, changed)
+    assert level == CompletenessLevel.COMPLETE
+    assert ratio == 1.0
+
+
+async def test_completeness_no_manifest():
+    """No manifest → UNKNOWN."""
+    level, ratio, missing = Dispatcher._check_completeness(None, ["a.go"])
+    assert level == CompletenessLevel.UNKNOWN
+    assert ratio == 0.0
