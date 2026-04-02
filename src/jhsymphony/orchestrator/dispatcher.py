@@ -452,21 +452,75 @@ class Dispatcher:
             )
             prompt = "\n".join(prompt_parts)
 
-            await self._run_agent(run_id, issue, provider, prompt, workspace)
+            seq_count = await self._run_agent(run_id, issue, provider, prompt, workspace)
 
             await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
             ws_path = str(workspace.path)
             default_branch = await self._detect_default_branch(ws_path)
             has_changes = await self._has_code_changes(ws_path, default_branch, issue)
 
-            if has_changes:
-                await self._do_pr_flow(issue, run_id, workspace, default_branch, analysis_text)
-            else:
+            if not has_changes:
                 await self._tracker.post_comment(
                     issue.number,
                     f"**JHSymphony** completed the implementation but no code changes were detected.\n*Run: `{run_id}`*",
                 )
                 await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
+                return
+
+            # ── Verification Pipeline ──
+            manifest = self._parse_plan_manifest(analysis_text) if analysis_text else None
+
+            diff_result = await run_subprocess(
+                ["git", "diff", "--name-only", f"origin/{default_branch}...HEAD"],
+                cwd=ws_path, env=None, timeout_sec=10,
+            )
+            changed_files = [f for f in diff_result.stdout.strip().split("\n") if f]
+
+            verification = await self._verify_execution(run_id, manifest, changed_files)
+
+            # Gate 3: Action decision
+            if verification.health == ExecutionHealth.FAILED:
+                logger.error("Run %s: execution health FAILED, aborting PR", run_id)
+                await self._tracker.post_comment(
+                    issue.number,
+                    f"**JHSymphony** implementation failed (exit_code={verification.exit_code}).\n"
+                    f"*Run: `{run_id}`*",
+                )
+                await self._storage.update_run_status(run_id, RunStatus.FAILED, error="execution_health_failed")
+                await self._storage.update_issue_state(issue.id, IssueState.FAILED)
+                return
+
+            if verification.completeness == CompletenessLevel.INCOMPLETE:
+                logger.info("Run %s: INCOMPLETE (%.0f%%), attempting remediation", run_id, verification.coverage_ratio * 100)
+                diff_stat_result = await run_subprocess(
+                    ["git", "diff", "--stat", f"origin/{default_branch}...HEAD"],
+                    cwd=ws_path, env=None, timeout_sec=10,
+                )
+                await self._run_remediation(
+                    run_id, issue, provider, workspace, manifest,
+                    verification.missing_files, diff_stat_result.stdout.strip(),
+                )
+                await self._has_code_changes(ws_path, default_branch, issue)
+                diff_result2 = await run_subprocess(
+                    ["git", "diff", "--name-only", f"origin/{default_branch}...HEAD"],
+                    cwd=ws_path, env=None, timeout_sec=10,
+                )
+                new_changed = [f for f in diff_result2.stdout.strip().split("\n") if f]
+                new_verification = await self._verify_execution(run_id, manifest, new_changed)
+                new_verification.remediation_attempted = True
+                new_verification.remediation_helped = (
+                    new_verification.coverage_ratio > verification.coverage_ratio
+                )
+                verification = new_verification
+
+            use_draft = verification.completeness in (
+                CompletenessLevel.INCOMPLETE, CompletenessLevel.PARTIAL,
+            )
+            report = self._build_verification_report(verification)
+            await self._do_pr_flow(
+                issue, run_id, workspace, default_branch, analysis_text,
+                verification_report=report, draft=use_draft,
+            )
 
         except asyncio.CancelledError:
             await self._storage.update_run_status(run_id, RunStatus.CANCELLED)
@@ -498,22 +552,29 @@ class Dispatcher:
         return "\n\n---\n\n".join(parts)
 
     async def _do_pr_flow(
-        self, issue: Issue, run_id: str, workspace: Any, default_branch: str, analysis_text: str = ""
+        self,
+        issue: Issue,
+        run_id: str,
+        workspace: Any,
+        default_branch: str,
+        analysis_text: str = "",
+        verification_report: str = "",
+        draft: bool = False,
     ) -> None:
         """Push branch, create PR (without closing issue)."""
         ws_path = str(workspace.path)
 
-        # Collect docs files for PR body before push
         docs_content = await self._read_docs_files(ws_path)
 
         await self._tracker.push_branch(ws_path, workspace.branch)
 
-        # Build PR body with analysis plan and docs
-        body_parts = [f"## Analysis & Implementation Plan\n"]
+        body_parts = ["## Analysis & Implementation Plan\n"]
         if analysis_text and analysis_text != "Analysis completed.":
             body_parts.append(analysis_text)
         if docs_content:
             body_parts.append(f"\n\n---\n\n## Implementation Details\n\n{docs_content}")
+        if verification_report:
+            body_parts.append(f"\n\n---\n\n{verification_report}")
         body_parts.append(f"\n\n---\n<sub>Implemented by JHSymphony | Issue: #{issue.number} | Run: `{run_id}`</sub>")
 
         pr = await self._tracker.create_pr(
@@ -521,14 +582,22 @@ class Dispatcher:
             head=workspace.branch,
             base=default_branch,
             body="\n".join(body_parts),
+            draft=draft,
         )
         pr_url = pr.get("html_url", "")
+
+        status_label = " (draft — incomplete implementation)" if draft else ""
         await self._tracker.post_comment(
             issue.number,
-            f"**JHSymphony** created a PR for this issue.\n- PR: {pr_url}\n- Run: `{run_id}`",
+            f"**JHSymphony** created a PR for this issue{status_label}.\n- PR: {pr_url}\n- Run: `{run_id}`",
         )
+        if draft:
+            try:
+                await self._tracker.add_labels(issue.number, ["needs-followup"])
+            except Exception:
+                pass
         await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
-        logger.info("Created PR for issue #%d (issue left open)", issue.number)
+        logger.info("Created %sPR for issue #%d", "draft " if draft else "", issue.number)
 
     @staticmethod
     def _is_question_issue(issue: Issue) -> bool:

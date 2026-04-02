@@ -67,10 +67,10 @@ class GitHubTracker:
             for c in resp.json()
         ]
 
-    async def create_pr(self, title: str, head: str, base: str, body: str) -> dict:
+    async def create_pr(self, title: str, head: str, base: str, body: str, draft: bool = False) -> dict:
         url = f"{_API_BASE}/repos/{self._repo}/pulls"
         resp = await self._client.post(url, json={
-            "title": title, "head": head, "base": base, "body": body,
+            "title": title, "head": head, "base": base, "body": body, "draft": draft,
         })
         resp.raise_for_status()
         return resp.json()
