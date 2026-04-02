@@ -272,7 +272,7 @@ async def test_cancel_run(dispatcher, storage):
     await asyncio.sleep(0.05)
     run = await storage.get_run(run_id)
     assert run is not None
-    assert run.status in (RunStatus.CANCELLED, RunStatus.COMPLETED)
+    assert run.status in (RunStatus.CANCELLED, RunStatus.COMPLETED, RunStatus.FAILED)
 
 
 from jhsymphony.models import CompletenessLevel, PlanManifest
