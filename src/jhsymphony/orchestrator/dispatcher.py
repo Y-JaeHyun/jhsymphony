@@ -468,84 +468,107 @@ class Dispatcher:
             )
             prompt = "\n".join(prompt_parts)
 
-            seq_count = await self._run_agent(run_id, issue, provider, prompt, workspace)
-
-            await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
             ws_path = str(workspace.path)
             default_branch = await self._detect_default_branch(ws_path)
-            has_changes = await self._has_code_changes(ws_path, default_branch, issue)
-
-            if not has_changes:
-                await self._tracker.post_comment(
-                    issue.number,
-                    f"**JHSymphony** completed the implementation but no code changes were detected.\n*Run: `{run_id}`*",
-                )
-                await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
-                return
-
-            # ── Verification Pipeline ──
             manifest = self._parse_plan_manifest(analysis_text) if analysis_text else None
 
-            diff_result = await run_subprocess(
-                ["git", "diff", "--name-only", f"origin/{default_branch}...HEAD"],
-                cwd=ws_path, env=None, timeout_sec=10,
-            )
-            changed_files = [f for f in diff_result.stdout.strip().split("\n") if f]
+            # ── Continuation Loop ──
+            # max_turns exceeded is treated as a checkpoint, not a failure.
+            # Each iteration: run agent → commit → verify → continue if making progress.
+            max_continuations = 2  # first run + up to 2 continuations
+            verification = None
+            prev_coverage = -1.0
 
-            verification = await self._verify_execution(run_id, manifest, changed_files)
+            for iteration in range(1 + max_continuations):
+                # Check budget before each iteration
+                run_cost = await self._storage.sum_run_cost(run_id)
+                if run_cost >= self._budget_per_run_limit * 0.8 and iteration > 0:
+                    logger.warning("Run %s: budget %.0f%% used, stopping continuations", run_id, run_cost / self._budget_per_run_limit * 100)
+                    break
 
-            # Gate 3: Action decision
-            if verification.health == ExecutionHealth.FAILED and not has_changes:
-                # Only abort if FAILED *and* no code changes produced.
-                # If there are code changes despite exit_code!=0 (e.g. max_turns exceeded),
-                # proceed to completeness check and create a (possibly draft) PR.
-                logger.error("Run %s: execution health FAILED with no changes, aborting PR", run_id)
-                await self._tracker.post_comment(
-                    issue.number,
-                    f"**JHSymphony** implementation failed (exit_code={verification.exit_code}, no changes).\n"
-                    f"*Run: `{run_id}`*",
-                )
-                await self._storage.update_run_status(run_id, RunStatus.FAILED, error="execution_health_failed")
-                await self._storage.update_issue_state(issue.id, IssueState.FAILED)
-                try:
-                    await self._tracker.remove_label(issue.number, "approved")
-                except Exception:
-                    pass
-                return
+                if iteration == 0:
+                    await self._run_agent(run_id, issue, provider, prompt, workspace)
+                else:
+                    diff_stat_result = await run_subprocess(
+                        ["git", "diff", "--stat", f"origin/{default_branch}...HEAD"],
+                        cwd=ws_path, env=None, timeout_sec=10,
+                    )
+                    await self._run_remediation(
+                        run_id, issue, provider, workspace, manifest,
+                        verification.missing_files, diff_stat_result.stdout.strip(),
+                    )
 
-            # Attempt remediation if INCOMPLETE, or SUSPECT + PARTIAL
-            should_remediate = (
-                verification.completeness == CompletenessLevel.INCOMPLETE
-                or (verification.health == ExecutionHealth.SUSPECT
-                    and verification.completeness == CompletenessLevel.PARTIAL)
-            )
-            if should_remediate and manifest is not None:
-                logger.info("Run %s: INCOMPLETE (%.0f%%), attempting remediation", run_id, verification.coverage_ratio * 100)
-                diff_stat_result = await run_subprocess(
-                    ["git", "diff", "--stat", f"origin/{default_branch}...HEAD"],
-                    cwd=ws_path, env=None, timeout_sec=10,
-                )
-                await self._run_remediation(
-                    run_id, issue, provider, workspace, manifest,
-                    verification.missing_files, diff_stat_result.stdout.strip(),
-                )
-                await self._has_code_changes(ws_path, default_branch, issue)
-                diff_result2 = await run_subprocess(
+                # Commit any uncommitted changes
+                has_changes = await self._has_code_changes(ws_path, default_branch, issue)
+
+                if not has_changes and iteration == 0:
+                    await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
+                    await self._tracker.post_comment(
+                        issue.number,
+                        f"**JHSymphony** completed the implementation but no code changes were detected.\n*Run: `{run_id}`*",
+                    )
+                    await self._storage.update_issue_state(issue.id, IssueState.COMPLETED)
+                    return
+
+                # Verify execution
+                diff_result = await run_subprocess(
                     ["git", "diff", "--name-only", f"origin/{default_branch}...HEAD"],
                     cwd=ws_path, env=None, timeout_sec=10,
                 )
-                new_changed = [f for f in diff_result2.stdout.strip().split("\n") if f]
-                new_verification = await self._verify_execution(run_id, manifest, new_changed)
-                new_verification.remediation_attempted = True
-                new_verification.remediation_helped = (
-                    new_verification.coverage_ratio > verification.coverage_ratio
-                )
-                verification = new_verification
+                changed_files = [f for f in diff_result.stdout.strip().split("\n") if f]
+                verification = await self._verify_execution(run_id, manifest, changed_files)
 
-            use_draft = verification.completeness in (
+                # FAILED with no changes at all → abort
+                if verification.health == ExecutionHealth.FAILED and not has_changes:
+                    logger.error("Run %s: execution FAILED with no changes, aborting", run_id)
+                    await self._tracker.post_comment(
+                        issue.number,
+                        f"**JHSymphony** implementation failed (exit_code={verification.exit_code}, no changes).\n"
+                        f"*Run: `{run_id}`*",
+                    )
+                    await self._storage.update_run_status(run_id, RunStatus.FAILED, error="execution_health_failed")
+                    await self._storage.update_issue_state(issue.id, IssueState.FAILED)
+                    try:
+                        await self._tracker.remove_label(issue.number, "approved")
+                    except Exception:
+                        pass
+                    return
+
+                # Complete → done!
+                if verification.completeness == CompletenessLevel.COMPLETE:
+                    logger.info("Run %s: COMPLETE after iteration %d", run_id, iteration)
+                    break
+
+                # CHECKPOINT (max_turns) or INCOMPLETE → continue if making progress
+                if verification.health in (ExecutionHealth.CHECKPOINT, ExecutionHealth.OK, ExecutionHealth.SUSPECT):
+                    current_coverage = verification.coverage_ratio
+                    if iteration > 0 and current_coverage <= prev_coverage:
+                        logger.info("Run %s: no progress (%.0f%% → %.0f%%), stopping", run_id, prev_coverage * 100, current_coverage * 100)
+                        break
+                    if manifest is None:
+                        break  # can't assess progress without manifest
+                    prev_coverage = current_coverage
+                    if iteration < max_continuations:
+                        logger.info(
+                            "Run %s: iteration %d — coverage %.0f%%, continuing...",
+                            run_id, iteration, current_coverage * 100,
+                        )
+                    continue
+
+                # FAILED with changes → don't retry, proceed to PR
+                break
+
+            # ── Post-loop: Create PR ──
+            await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
+
+            if verification is not None and iteration > 0:
+                verification.remediation_attempted = True
+                verification.remediation_helped = verification.coverage_ratio > 0
+
+            use_draft = verification is not None and verification.completeness in (
                 CompletenessLevel.INCOMPLETE, CompletenessLevel.PARTIAL,
             )
-            report = self._build_verification_report(verification)
+            report = self._build_verification_report(verification) if verification else ""
             await self._do_pr_flow(
                 issue, run_id, workspace, default_branch, analysis_text,
                 verification_report=report, draft=use_draft,
@@ -752,13 +775,23 @@ class Dispatcher:
 
         return PlanManifest(required_files=files, expected_file_count_min=len(files))
 
+    _MAX_TURNS_PATTERNS = re.compile(
+        r"max.?turns|turn.?limit|maximum.*turns|reached.*limit", re.IGNORECASE
+    )
+
     async def _check_execution_health(self, run_id: str) -> tuple[ExecutionHealth, dict]:
-        """Gate 1: Check if the Claude CLI execution completed healthily."""
+        """Gate 1: Check if the Claude CLI execution completed healthily.
+
+        Returns CHECKPOINT when max_turns was likely exceeded (exit_code!=0 but
+        evidence of productive work with no explicit errors).
+        """
         events = await self._storage.list_events(run_id, since_seq=-1)
         event_count = len(events)
         exit_code = 0
         has_error = False
         budget_killed = False
+        stderr_text = ""
+        has_tool_calls = False
 
         for evt in events:
             evt_type = evt.get("type") or evt.get("event_type", "")
@@ -766,8 +799,11 @@ class Dispatcher:
 
             if evt_type == "completed":
                 exit_code = payload.get("exit_code", 0)
+                stderr_text = payload.get("stderr", "")
             elif evt_type == "error":
                 has_error = True
+            elif evt_type == "tool.call":
+                has_tool_calls = True
 
         run_cost = await self._storage.sum_run_cost(run_id)
         if run_cost >= self._budget_per_run_limit:
@@ -778,13 +814,27 @@ class Dispatcher:
             "exit_code": exit_code,
             "has_error": has_error,
             "budget_killed": budget_killed,
+            "stderr": stderr_text,
         }
 
-        if has_error or exit_code != 0:
+        if exit_code == 0 and not has_error:
+            if event_count < 10 or budget_killed:
+                return ExecutionHealth.SUSPECT, info
+            return ExecutionHealth.OK, info
+
+        # exit_code != 0 — distinguish max_turns (CHECKPOINT) from real errors
+        if has_error:
             return ExecutionHealth.FAILED, info
-        if event_count < 10 or budget_killed:
-            return ExecutionHealth.SUSPECT, info
-        return ExecutionHealth.OK, info
+
+        # Heuristic: if there were tool calls and many events, likely max_turns exceeded
+        is_max_turns = (
+            self._MAX_TURNS_PATTERNS.search(stderr_text)
+            or (has_tool_calls and event_count >= 10 and not has_error)
+        )
+        if is_max_turns:
+            return ExecutionHealth.CHECKPOINT, info
+
+        return ExecutionHealth.FAILED, info
 
     @staticmethod
     def _check_completeness(

@@ -67,6 +67,7 @@ class EventType(StrEnum):
 
 class ExecutionHealth(StrEnum):
     OK = "ok"
+    CHECKPOINT = "checkpoint"
     SUSPECT = "suspect"
     FAILED = "failed"
 
