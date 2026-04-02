@@ -731,6 +731,25 @@ class Dispatcher:
             has_error_events=info["has_error"],
         )
 
+    @staticmethod
+    def _build_verification_report(result: VerificationResult) -> str:
+        """Build a markdown verification report for inclusion in PR body."""
+        lines = [
+            "## Verification Report",
+            f"- **Health**: {result.health.value.upper()}",
+            f"- **Coverage**: {len(result.changed_files)}/{len(result.changed_files) + len(result.missing_files)}"
+            f" required files ({result.coverage_ratio:.0%})",
+        ]
+        if result.missing_files:
+            files_str = ", ".join(f"`{f}`" for f in result.missing_files)
+            lines.append(f"- **Missing**: {files_str}")
+        if result.remediation_attempted:
+            outcome = "improved" if result.remediation_helped else "no change"
+            lines.append(f"- **Remediation**: 1 attempt ({outcome})")
+        lines.append(f"- **Events**: {result.event_count}")
+        lines.append(f"- **Exit code**: {result.exit_code}")
+        return "\n".join(lines)
+
     async def cancel_run(self, run_id: str) -> None:
         task = self._tasks.get(run_id)
         if task is not None and not task.done():

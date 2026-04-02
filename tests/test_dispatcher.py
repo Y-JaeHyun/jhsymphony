@@ -475,3 +475,38 @@ async def test_verify_execution_no_manifest(dispatcher, storage):
     result = await dispatcher._verify_execution(run_id, None, ["some.go"])
     assert result.health == ExecutionHealth.OK
     assert result.completeness == CompletenessLevel.UNKNOWN
+
+
+async def test_build_verification_report():
+    """Should produce markdown report from VerificationResult."""
+    result = VerificationResult(
+        health=ExecutionHealth.OK,
+        completeness=CompletenessLevel.PARTIAL,
+        coverage_ratio=0.67,
+        missing_files=["TaskInfraNetstat.go", "CounterManager.go"],
+        changed_files=["DataStructure.go", "MemoryLinux.go", "ProcessLinux.go"],
+        event_count=47,
+        exit_code=0,
+    )
+    report = Dispatcher._build_verification_report(result)
+    assert "## Verification Report" in report
+    assert "OK" in report
+    assert "67%" in report
+    assert "TaskInfraNetstat.go" in report
+    assert "CounterManager.go" in report
+
+
+async def test_build_verification_report_complete():
+    """Complete result should show no missing files."""
+    result = VerificationResult(
+        health=ExecutionHealth.OK,
+        completeness=CompletenessLevel.COMPLETE,
+        coverage_ratio=1.0,
+        missing_files=[],
+        changed_files=["a.go", "b.go"],
+        event_count=100,
+        exit_code=0,
+    )
+    report = Dispatcher._build_verification_report(result)
+    assert "100%" in report
+    assert "Missing" not in report
