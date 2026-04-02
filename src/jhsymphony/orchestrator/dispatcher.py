@@ -463,8 +463,10 @@ class Dispatcher:
         # ── Post-loop: Create PR + post self-decisions ──
         await self._storage.update_run_status(run_id, RunStatus.COMPLETED)
 
-        # Extract self-decisions from agent output
+        # Extract self-decisions from agent output + docs/analysis.md
         self_decisions = self._extract_self_decisions(agent_response)
+        if not self_decisions:
+            self_decisions = self._extract_self_decisions_from_docs(ws_path)
 
         # Determine draft: if there are self-decisions or incomplete
         use_draft = bool(self_decisions) or (
@@ -868,11 +870,20 @@ class Dispatcher:
 
         await self._tracker.push_branch(ws_path, workspace.branch)
 
-        body_parts = ["## Analysis & Implementation Plan\n"]
-        if analysis_text and analysis_text != "Analysis completed.":
-            body_parts.append(analysis_text)
+        body_parts: list[str] = []
         if docs_content:
-            body_parts.append(f"\n\n---\n\n## Implementation Details\n\n{docs_content}")
+            # Prefer structured docs/analysis.md over raw agent output
+            body_parts.append(docs_content)
+            if analysis_text and analysis_text != "Analysis completed.":
+                body_parts.append(
+                    "\n\n---\n\n<details>\n<summary>Raw Agent Output (참고용)</summary>\n\n"
+                    + analysis_text
+                    + "\n\n</details>"
+                )
+        elif analysis_text and analysis_text != "Analysis completed.":
+            body_parts.append(f"## Analysis & Implementation Plan\n\n{analysis_text}")
+        else:
+            body_parts.append("## Analysis & Implementation Plan\n\n_(No analysis output captured)_")
         if verification_report:
             body_parts.append(f"\n\n---\n\n{verification_report}")
         body_parts.append(f"\n\n---\n<sub>Implemented by JHSymphony | Issue: #{issue.number} | Run: `{run_id}`</sub>")
@@ -935,33 +946,81 @@ class Dispatcher:
             "2. Where you identify decision points (multiple valid approaches), "
             "choose the best option and document your choice\n"
             "3. Implement ALL changes immediately\n"
-            "4. Commit after each logical unit of work\n\n"
-            "## Self-Decisions Documentation\n"
-            "For each decision you made during implementation, include a section at the END of your work:\n\n"
-            "<!-- self-decisions -->\n"
-            "- SELF-DECISION: <title> — Chose <option> because <reasoning>. Alternative was <other option>.\n"
-            "<!-- /self-decisions -->\n\n"
-            "Examples of decisions: field naming conventions, data collection methods, "
-            "breaking change handling, file structure choices.\n\n"
+            "4. Commit after each logical unit of work\n"
+            "5. After ALL implementation is done, write `docs/analysis.md` (see below)\n\n"
+            "## Analysis Report (REQUIRED)\n"
+            "After completing all code changes, you MUST create a file `docs/analysis.md` "
+            "with the following sections:\n\n"
+            "```markdown\n"
+            "## Summary\n"
+            "Brief description of what was implemented and why.\n\n"
+            "## Changes Made\n"
+            "- File: `path/to/file` — what was changed and why\n"
+            "- (repeat for each file)\n\n"
+            "## Affected Files\n"
+            "| File | Change Type |\n"
+            "|------|-------------|\n"
+            "| `path/to/file` | Modified / Created / Deleted |\n\n"
+            "## Self-Decisions\n"
+            "For each non-trivial decision made during implementation:\n"
+            "- SELF-DECISION: <title> — Chose <option> because <reasoning>. Alternative was <other option>.\n\n"
+            "If no decisions were made, write: 'No self-decisions were required.'\n"
+            "```\n\n"
+            "This file will be used as the PR description. Do NOT skip it.\n\n"
             "## Critical Rules\n"
             "- Implement ALL items required by the issue. Partial implementation is NOT acceptable.\n"
             "- Read ONLY files you will directly edit. Do NOT explore unrelated code.\n"
             "- Start making code changes IMMEDIATELY after reading each target file.\n"
-            "- Commit after each logical unit of work.\n\n"
+            "- Commit after each logical unit of work.\n"
+            "- The `docs/analysis.md` file MUST be your final action before finishing.\n\n"
             "Work in the current directory. Do not ask questions — just implement."
         )
 
     _SELF_DECISION_RE = re.compile(
         r"SELF-DECISION:\s*(.+?)(?:\n|$)", re.IGNORECASE
     )
+    _SELF_DECISIONS_SECTION_RE = re.compile(
+        r"##\s*Self-Decisions\s*\n(.*?)(?=\n##\s|\Z)", re.DOTALL | re.IGNORECASE
+    )
 
     @staticmethod
     def _extract_self_decisions(agent_response: str) -> list[str]:
-        """Extract self-decision entries from agent output."""
+        """Extract self-decision entries from agent output.
+
+        Strategy 1: SELF-DECISION: marker lines (original).
+        Strategy 2 (fallback): list items under ## Self-Decisions heading.
+        """
         decisions = []
         for m in Dispatcher._SELF_DECISION_RE.finditer(agent_response):
             decisions.append(m.group(1).strip())
+        if decisions:
+            return decisions
+
+        # Fallback: parse ## Self-Decisions section
+        section_match = Dispatcher._SELF_DECISIONS_SECTION_RE.search(agent_response)
+        if section_match:
+            section_text = section_match.group(1)
+            for line in section_text.strip().splitlines():
+                line = line.strip()
+                if line.startswith(("-", "*", "•")):
+                    item = line.lstrip("-*• ").strip()
+                    if item and "no self-decisions" not in item.lower():
+                        decisions.append(item)
         return decisions
+
+    @staticmethod
+    def _extract_self_decisions_from_docs(ws_path: str) -> list[str]:
+        """Extract self-decision entries from docs/analysis.md if present."""
+        import os
+        analysis_path = os.path.join(ws_path, "docs", "analysis.md")
+        if not os.path.isfile(analysis_path):
+            return []
+        try:
+            with open(analysis_path) as f:
+                content = f.read()
+        except Exception:
+            return []
+        return Dispatcher._extract_self_decisions(content)
 
     _DECISION_PATTERN = re.compile(r"DECISION-\d+", re.IGNORECASE)
 
@@ -1232,9 +1291,17 @@ class Dispatcher:
         lines = [
             "## Verification Report",
             f"- **Health**: {result.health.value.upper()}",
-            f"- **Coverage**: {len(result.changed_files)}/{len(result.changed_files) + len(result.missing_files)}"
-            f" required files ({result.coverage_ratio:.0%})",
         ]
+        if result.completeness == CompletenessLevel.UNKNOWN:
+            lines.append(
+                f"- **Coverage**: N/A (no manifest) — {len(result.changed_files)} files changed"
+            )
+        else:
+            total = len(result.changed_files) + len(result.missing_files)
+            covered = total - len(result.missing_files)
+            lines.append(
+                f"- **Coverage**: {covered}/{total} required files ({result.coverage_ratio:.0%})"
+            )
         if result.missing_files:
             files_str = ", ".join(f"`{f}`" for f in result.missing_files)
             lines.append(f"- **Missing**: {files_str}")

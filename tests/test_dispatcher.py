@@ -512,6 +512,60 @@ async def test_build_verification_report_complete():
     assert "Missing" not in report
 
 
+async def test_build_verification_report_unknown():
+    """UNKNOWN completeness (no manifest) should show N/A instead of misleading 0%."""
+    result = VerificationResult(
+        health=ExecutionHealth.FAILED,
+        completeness=CompletenessLevel.UNKNOWN,
+        coverage_ratio=0.0,
+        missing_files=[],
+        changed_files=["a.go", "b.go", "c.go", "d.go", "e.go", "f.go"],
+        event_count=140,
+        exit_code=1,
+    )
+    report = Dispatcher._build_verification_report(result)
+    assert "N/A" in report
+    assert "6 files changed" in report
+    assert "0%" not in report
+
+
+async def test_extract_self_decisions_marker_format():
+    """Should extract SELF-DECISION: marker lines."""
+    text = (
+        "Some output\n"
+        "- SELF-DECISION: Field naming — Chose snake_case because Go convention. Alternative was camelCase.\n"
+        "- SELF-DECISION: DB choice — Chose SQLite because simplicity. Alternative was PostgreSQL.\n"
+    )
+    decisions = Dispatcher._extract_self_decisions(text)
+    assert len(decisions) == 2
+    assert "snake_case" in decisions[0]
+
+
+async def test_extract_self_decisions_heading_fallback():
+    """Should extract from ## Self-Decisions section as fallback."""
+    text = (
+        "## Summary\nDid some work.\n\n"
+        "## Self-Decisions\n"
+        "- Chose snake_case for field naming because Go convention\n"
+        "- Used SQLite for simplicity over PostgreSQL\n\n"
+        "## Changes Made\n"
+        "Some changes.\n"
+    )
+    decisions = Dispatcher._extract_self_decisions(text)
+    assert len(decisions) == 2
+    assert "snake_case" in decisions[0]
+
+
+async def test_extract_self_decisions_no_decisions():
+    """'No self-decisions' text should return empty list."""
+    text = (
+        "## Self-Decisions\n"
+        "- No self-decisions were required.\n"
+    )
+    decisions = Dispatcher._extract_self_decisions(text)
+    assert decisions == []
+
+
 async def test_run_remediation_builds_correct_prompt(storage, mock_workspace_mgr, mock_tracker):
     """Remediation should build a prompt referencing missing items."""
     captured_prompt = {}

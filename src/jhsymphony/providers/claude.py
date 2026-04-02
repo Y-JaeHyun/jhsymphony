@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class ClaudeProvider:
-    def __init__(self, command: str = "claude", model: str = "claude-opus-4-5", max_turns: int = 30) -> None:
+    def __init__(self, command: str = "claude", model: str = "claude-opus-4-5", max_turns: int = 50) -> None:
         self._command = command
         self._model = model
         self._max_turns = max_turns

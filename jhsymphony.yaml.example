@@ -18,7 +18,7 @@ providers:
   claude:
     command: "claude"
     model: "opus"
-    max_turns: 30
+    max_turns: 100
   codex:
     command: "codex"
     model: "gpt-5.4"
