@@ -796,15 +796,20 @@ class Dispatcher:
             if revision_feedback:
                 prompt_parts.append(
                     f"## Revision Requested\n"
-                    f"The following feedback was provided after PR review. You MUST address ALL items:\n\n"
+                    f"The following feedback was provided after PR review:\n\n"
                     f"{revision_feedback}\n\n"
                 )
             prompt_parts.append(
-                "Implement the requested changes. The existing code on this branch is your starting point.\n"
-                "Read related files as needed to understand context before making changes.\n"
-                "Correctness over speed — verify your changes work before finishing.\n"
-                "Make a single final commit after all changes are complete.\n"
-                "Do not ask questions — document any decisions in commit message."
+                "## Revision Rules\n"
+                "- **Every feedback item MUST result in a code change.** The reviewer explicitly "
+                "requested changes — your job is to implement them, not to judge whether they are needed.\n"
+                "- If the reviewer says to revert something, revert it. If they say to change an approach, change it.\n"
+                "- Do NOT rationalize that the current code is already correct. The reviewer has examined it "
+                "and decided it needs changes.\n"
+                "- Read the specific files and functions mentioned in the feedback.\n"
+                "- After making ALL requested changes, verify the code compiles/works.\n"
+                "- Do NOT skip any feedback item. Partial revision is NOT acceptable.\n\n"
+                "Work in the current directory. Make the code changes directly — do not just read and analyze."
             )
             prompt = "\n".join(prompt_parts)
 
@@ -820,10 +825,22 @@ class Dispatcher:
                     f"**JHSymphony** revised the PR based on feedback.\n*Run: `{run_id}`*",
                 )
             else:
+                # Collect what the agent said about why no changes were made
+                agent_response = await self._collect_agent_response(run_id)
+                # Truncate to avoid overly long comments
+                explanation = agent_response[:1000] if agent_response else "(no explanation provided)"
                 await self._tracker.post_comment(
                     issue.number,
-                    f"**JHSymphony** processed the revision but no additional changes were made.\n*Run: `{run_id}`*",
+                    f"**JHSymphony** processed the revision but made no code changes.\n\n"
+                    f"**Agent explanation:**\n{explanation}\n\n"
+                    f"If changes are still needed, please re-add the `needs-revision` label.\n"
+                    f"*Run: `{run_id}`*",
                 )
+                # Re-add needs-revision so the reviewer can easily retry
+                try:
+                    await self._tracker.add_labels(issue.number, ["needs-revision"])
+                except Exception:
+                    pass
 
             await self._storage.update_issue_state(issue.id, IssueState.PR_OPEN)
 
