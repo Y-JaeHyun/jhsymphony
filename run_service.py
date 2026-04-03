@@ -110,11 +110,36 @@ async def run_repo(
     await scheduler.run()
 
 
-async def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+def _setup_logging():
+    """Configure logging with RotatingFileHandler and reduced httpx noise."""
+    from logging.handlers import RotatingFileHandler
+
+    log_dir = Path.home() / ".jhsymphony" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "jhsymphony.log"
+
+    fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+
+    file_handler = RotatingFileHandler(
+        str(log_file), maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8",
     )
+    file_handler.setFormatter(fmt)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
+
+    # Suppress noisy httpx/httpcore polling logs
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+async def main():
+    _setup_logging()
 
     config = load_config(Path("jhsymphony.yaml"))
     repos = config.get_repos()

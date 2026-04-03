@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import random
+
 import httpx
 
 from jhsymphony.models import Issue, IssueState
 
 _API_BASE = "https://api.github.com"
+
+logger = logging.getLogger(__name__)
+
+_RETRYABLE_EXCEPTIONS = (httpx.TransportError, httpx.TimeoutException)
+_RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 
 
 def _repo_slug(repo: str) -> str:
@@ -22,9 +31,31 @@ class GitHubTracker:
             headers["Authorization"] = f"Bearer {token}"
         self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
 
+    async def _get_with_retry(
+        self, url: str, params: dict | None = None, max_retries: int = 3,
+    ) -> httpx.Response:
+        """GET with exponential backoff retry for transient errors."""
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                resp = await self._client.get(url, params=params)
+                if resp.status_code in _RETRYABLE_STATUS_CODES and attempt < max_retries - 1:
+                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning("GET %s returned %d, retrying in %.1fs", url, resp.status_code, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                return resp
+            except _RETRYABLE_EXCEPTIONS as exc:
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning("GET %s failed (%s), retrying in %.1fs", url, exc, wait)
+                    await asyncio.sleep(wait)
+        raise last_exc  # type: ignore[misc]
+
     async def fetch_candidates(self) -> list[Issue]:
         url = f"{_API_BASE}/repos/{self._repo}/issues"
-        resp = await self._client.get(url, params={
+        resp = await self._get_with_retry(url, params={
             "labels": self._label,
             "state": "open",
             "per_page": 100,
@@ -55,7 +86,7 @@ class GitHubTracker:
     async def fetch_comments(self, issue_number: int) -> list[dict]:
         """Fetch all comments on an issue, ordered by creation time."""
         url = f"{_API_BASE}/repos/{self._repo}/issues/{issue_number}/comments"
-        resp = await self._client.get(url, params={"per_page": 100})
+        resp = await self._get_with_retry(url, params={"per_page": 100})
         resp.raise_for_status()
         return [
             {
@@ -93,7 +124,7 @@ class GitHubTracker:
     async def check_label(self, issue_number: int, label: str) -> bool:
         """Check if an issue has a specific label."""
         url = f"{_API_BASE}/repos/{self._repo}/issues/{issue_number}/labels"
-        resp = await self._client.get(url)
+        resp = await self._get_with_retry(url)
         resp.raise_for_status()
         labels = [l["name"] for l in resp.json()]
         return label in labels
