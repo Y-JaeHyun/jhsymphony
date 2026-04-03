@@ -483,7 +483,7 @@ class Dispatcher:
         # Post self-decisions + reviewer attention to issue
         reviewer_attention = self._extract_section_from_docs(ws_path, "Reviewer Attention")
         if self_decisions or reviewer_attention:
-            parts = []
+            parts = ["<!-- jhsymphony:bot-comment -->"]
             if self_decisions:
                 parts.append(
                     "## Self-Decisions (관리자 검토 필요)\n"
@@ -757,21 +757,31 @@ class Dispatcher:
             if analysis_run:
                 analysis_text = await self._collect_agent_response(analysis_run.id)
 
-            # Collect ALL admin comments (including post-PR feedback)
+            # Collect ALL non-bot comments after PR creation as revision feedback.
+            # Uses content markers (<!-- jhsymphony:... -->) to identify bot comments,
+            # not bot_login — works even when bot and admin share the same account.
             revision_feedback = ""
-            if self._bot_login:
-                comments = await self._tracker.fetch_comments(issue.number)
-                # Find comments after the last bot "created a PR" comment
-                pr_comment_idx = -1
-                for i, c in enumerate(comments):
-                    if c["author"] == self._bot_login and "created a PR" in c["body"]:
-                        pr_comment_idx = i
-                admin_feedback = []
-                if pr_comment_idx >= 0:
-                    for c in comments[pr_comment_idx + 1:]:
-                        if c["author"] != self._bot_login:
-                            admin_feedback.append(c["body"])
-                revision_feedback = "\n\n".join(admin_feedback)
+            comments = await self._tracker.fetch_comments(issue.number)
+            # Find the last PR-creation comment by marker or fallback to content match
+            pr_comment_idx = -1
+            for i, c in enumerate(comments):
+                body = c.get("body", "")
+                if "<!-- jhsymphony:pr-created -->" in body or (
+                    "**JHSymphony**" in body and "created a PR" in body
+                ):
+                    pr_comment_idx = i
+            admin_feedback = []
+            if pr_comment_idx >= 0:
+                for c in comments[pr_comment_idx + 1:]:
+                    body = c.get("body", "")
+                    # Skip bot-generated comments (identified by marker or prefix)
+                    if "<!-- jhsymphony:" in body:
+                        continue
+                    if body.startswith("**JHSymphony**"):
+                        continue
+                    if body.strip():
+                        admin_feedback.append(body)
+            revision_feedback = "\n\n".join(admin_feedback)
 
             ws_path = str(workspace.path)
             default_branch = await self._detect_default_branch(ws_path)
@@ -920,6 +930,7 @@ class Dispatcher:
         status_label = " (draft — incomplete implementation)" if draft else ""
         await self._tracker.post_comment(
             issue.number,
+            f"<!-- jhsymphony:pr-created -->\n"
             f"**JHSymphony** created a PR for this issue{status_label}.\n- PR: {pr_url}\n- Run: `{run_id}`",
         )
         if draft:
